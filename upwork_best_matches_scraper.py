@@ -113,7 +113,7 @@ def main():
                 )
             )
             username_field.send_keys(Keys.ENTER)
-
+            time.sleep(4)
             logger.info('Submitting password')
             password_input = WebDriverWait(driver, 30).until(
                 EC.visibility_of_element_located(
