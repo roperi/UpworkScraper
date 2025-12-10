@@ -99,7 +99,7 @@ def main():
             username_input = WebDriverWait(driver, 30).until(
                 EC.visibility_of_element_located(
                     (By.XPATH,
-                     "/html/body/div[4]/div/div/div/main/div/div/div[2]/div[2]/form/div/div/div[1]/div[3]/div/div/div/"
+                     "/html/body/div[3]/div/div/div/main/div/div/div[2]/div[2]/form/div/div/div[1]/div[3]/div/div/div/"
                      "div/input")
                 )
             )
@@ -108,7 +108,7 @@ def main():
             username_field = WebDriverWait(driver, 30).until(
                 EC.visibility_of_element_located(
                     (By.XPATH,
-                     "/html/body/div[4]/div/div/div/main/div/div/div[2]/div[2]/form/div/div/div[1]/div[3]/div/div/div/"
+                     "/html/body/div[3]/div/div/div/main/div/div/div[2]/div[2]/form/div/div/div[1]/div[3]/div/div/div/"
                      "div/input")
                 )
             )
@@ -118,8 +118,8 @@ def main():
             password_input = WebDriverWait(driver, 30).until(
                 EC.visibility_of_element_located(
                     (By.XPATH,
-                     "/html/body/div[4]/div/div/div/main/div/div/div[2]/div[2]/div/form/div/div/div[1]/div[3]/div/div/div"
-                     "/input")
+                     "/html/body/div[3]/div/div/div/main/div/div/div[2]/div[2]/div/form/div/div/div[1]/div[3]/div/div/"
+                     "div/input")
                 )
 
             )
@@ -128,8 +128,8 @@ def main():
             password_field = WebDriverWait(driver, 30).until(
                 EC.visibility_of_element_located(
                     (By.XPATH,
-                     "/html/body/div[4]/div/div/div/main/div/div/div[2]/div[2]/div/form/div/div/div[1]/div[3]/div/div/div"
-                     "/input")
+                     "/html/body/div[3]/div/div/div/main/div/div/div[2]/div[2]/div/form/div/div/div[1]/div[3]/div/div/"
+                     "div/input")
                 )
 
             )
