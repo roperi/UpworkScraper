@@ -146,19 +146,28 @@ def main():
             # Scroll down using keyboard actions
             logger.info('Scrolling down page')
             body = driver.find_elements('xpath', "/html/body")
-            for i in range(0, 12):  # Just an arbitrary number of page downs
+            for i in range(0, 12):  # Takes about 12 page downs to reach the bottom
                 body[-1].send_keys(Keys.PAGE_DOWN)
                 time.sleep(2)
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            timeout_wait = 300
 
-            # Wait for element to load
-            logger.info(f'Waiting for element to load (max timeout set to {timeout_wait} seconds)...')
+            # Wait for footer to load
+            timeout_wait = 120
+            logger.info(f'Waiting for page footer (max {timeout_wait} seconds)...')
             wait = WebDriverWait(driver, timeout_wait)
-            wait.until(EC.element_to_be_clickable((By.XPATH, f'/html/body/div[4]/div/div/div/main/div[3]/div[4]')))
+            wait.until(EC.visibility_of_element_located((By.TAG_NAME, "footer")))
 
             # Get all text as a wall of text (including user's mini bio on the top-right panel)
-            text = driver.find_elements('xpath', f'/html/body/div[4]/div/div/div/main/div[3]/div[4]')[-1].text
+            jobs_container_xpath = '/html/body/div[3]/div/div/div/div[2]/div/main/div[3]'
+            jobs_containers = WebDriverWait(driver, 30).until(
+                EC.presence_of_all_elements_located((By.XPATH, jobs_container_xpath))
+            )
+            if not jobs_containers:
+                logger.error("No jobs container found; stopping this run.")
+                return False
+
+            # Get all text as a wall of text (including user's mini bio on the top-right panel)
+            text = jobs_containers[-1].text
             # Get rid of the right panel
             text_1 = text.split(config.UPWORK_USER_NAME)[0]
             # Get rid of the top panel
