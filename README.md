@@ -186,12 +186,6 @@ echo $PATH
 env | grep "DISPLAY"
 ```
 
-## TODO
-- Capture job URLs ✅
-- Capture job timestamp ✅
-- Load more jobs when reaching the bottom of the page after scrolling down.
-
-
 ## Contributing
 Contributions are welcome! If you encounter any issues or have suggestions for improvements, please open an issue or submit a pull request.
 
