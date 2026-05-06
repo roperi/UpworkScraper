@@ -182,10 +182,10 @@ def main():
             print('Scraping jobs...')
             counter = 0
             for j in job_posts:
-                job_details = parse_job_details(j.split('\n'))
+                job_url = job_urls[counter].split('/?')[0]
+                job_details = parse_job_details(j.split('\n'), job_url=job_url)
                 # Check if the job ID already exists in the database
                 job_id = job_details.get('job_id')
-                job_url = job_urls[counter].split('/?')[0]
                 cursor.execute('SELECT COUNT(*) FROM jobs WHERE job_id = ?', (job_id,))
                 count = cursor.fetchone()[0]
                 if count > 0:
