@@ -202,6 +202,10 @@ Upwork Scraper performs the following tasks:
 2. Scrapes job postings from Upwork Best Matches page.
 3. Parses job details and stores them in a SQLite database.
 
+During a scrape, progress logs report each scroll step, the number of visible job links, parsing
+counts, and periodic insert/update/failure totals. The final message reports inserted, updated,
+failed, and skipped jobs after the database commit succeeds.
+
 ### Google, Apple, and two-step login
 
 The scraper can automatically log in with native Upwork credentials when `UPWORK_PASSWORD` is
