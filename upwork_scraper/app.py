@@ -235,7 +235,7 @@ def main(argv: list[str] | None = None) -> bool:
         create_db(conn, cursor)
         driver, browser = launch_driver(settings)
         logger.info("Using %s (%s)", browser.executable, browser.version)
-        logger.info("Logging in to Upwork")
+        logger.info("Checking Upwork authentication")
         login(driver, settings, lambda message: logger.warning(message))
 
         _load_job_list(driver, logger)

@@ -1,4 +1,12 @@
-from upwork_scraper.auth import _authenticated, _login_warning, _visible_button
+from upwork_scraper import auth
+from upwork_scraper.auth import (
+    BEST_MATCHES_URL,
+    LOGIN_URL,
+    _authenticated,
+    _login_warning,
+    _visible_button,
+)
+from upwork_scraper.config import Settings
 
 
 class FakeElement:
@@ -15,15 +23,26 @@ class FakeElement:
 
 
 class FakeDriver:
-    def __init__(self, url, buttons=None, password_fields=None):
+    def __init__(self, url, buttons=None, password_fields=None, redirect_url=None):
         self.current_url = url
         self.buttons = buttons or []
         self.password_fields = password_fields or []
+        self.redirect_url = redirect_url
+        self.visited_urls = []
+
+    def get(self, url):
+        self.visited_urls.append(url)
+        if url == LOGIN_URL and self.redirect_url is not None:
+            self.current_url = self.redirect_url
+        else:
+            self.current_url = url
 
     def find_elements(self, _by, selector):
         if selector == "form#login button":
             return self.buttons
-        return self.password_fields
+        if selector == "login_password":
+            return self.password_fields
+        return []
 
 
 def test_visible_button_ignores_hidden_and_disabled_controls():
@@ -57,6 +76,25 @@ def test_authenticated_rejects_external_provider_page():
     provider_driver = FakeDriver("https://accounts.google.com/signin")
 
     assert not _authenticated(provider_driver)
+
+
+def test_login_reuses_authenticated_profile_on_best_matches(monkeypatch):
+    driver = FakeDriver(BEST_MATCHES_URL)
+    settings = Settings(username="user@example.com", password="secret", first_name="FirstName")
+
+    auth.login(driver, settings, lambda _message: None)
+
+    assert driver.visited_urls == [BEST_MATCHES_URL]
+
+
+def test_login_handles_authenticated_redirect_from_login_url(monkeypatch):
+    driver = FakeDriver("about:blank", redirect_url=BEST_MATCHES_URL)
+    settings = Settings(username="user@example.com", password="secret", first_name="FirstName")
+    monkeypatch.setattr(auth, "_dismiss_cookie_consent", lambda _driver: None)
+
+    auth.login(driver, settings, lambda _message: None)
+
+    assert driver.visited_urls == [LOGIN_URL, BEST_MATCHES_URL]
 
 
 def test_login_warning_detects_security_interstitials():

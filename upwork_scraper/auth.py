@@ -106,11 +106,20 @@ def _login_warning(text: str) -> str | None:
 
 
 def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
+    if _authenticated(driver):
+        driver.get(BEST_MATCHES_URL)
+        return
+
     driver.get(LOGIN_URL)
     _dismiss_cookie_consent(driver)
-    username = WebDriverWait(driver, 30).until(
-        lambda d: _visible_element_by_id(d, "login_username")
+    login_step = WebDriverWait(driver, 30).until(
+        lambda d: _authenticated(d) or _visible_element_by_id(d, "login_username")
     )
+    if login_step is True:
+        driver.get(BEST_MATCHES_URL)
+        return
+
+    username = login_step
     username.clear()
     username.send_keys(settings.username)
     _click_submit(driver, username)

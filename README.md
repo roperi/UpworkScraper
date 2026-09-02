@@ -198,7 +198,7 @@ uv run python upwork_best_matches_scraper.py
 ## Functionality
 Upwork Scraper performs the following tasks:
 
-1. Goes to the Upwork login page and logs you in.
+1. Reuses an authenticated browser profile or goes to the Upwork login page and logs you in.
 2. Scrapes job postings from Upwork Best Matches page.
 3. Parses job details and stores them in a SQLite database.
 

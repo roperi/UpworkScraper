@@ -21,6 +21,7 @@ import paths changed.
 
 ### Changed
 
+- Authentication now reuses an already-authenticated persistent browser profile.
 - Reorganized database and parsing modules under `upwork_scraper`.
 - CI now uses the Makefile quality gate.
 - SQLite is the only supported persistence format.
