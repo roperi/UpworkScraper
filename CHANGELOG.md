@@ -10,6 +10,7 @@ import paths changed.
 ### Added
 
 - Real-time scrape progress and inserted/updated/failed/skipped job summaries.
+- Scrape summaries now distinguish changed jobs from unchanged existing jobs.
 - Manual login support for Google-, Apple-, and two-step verification flows when
   `UPWORK_PASSWORD` is not configured.
 - Environment-based credential and runtime configuration.

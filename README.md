@@ -203,8 +203,9 @@ Upwork Scraper performs the following tasks:
 3. Parses job details and stores them in a SQLite database.
 
 During a scrape, progress logs report each scroll step, the number of visible job links, parsing
-counts, and periodic insert/update/failure totals. The final message reports inserted, updated,
-failed, and skipped jobs after the database commit succeeds.
+counts, and periodic insert/update/unchanged/failure totals. The final message reports inserted,
+updated, unchanged, failed, and skipped jobs after the database commit succeeds. An updated job has
+a changed proposal value; an unchanged job was already stored with the same proposal value.
 
 ### Google, Apple, and two-step login
 

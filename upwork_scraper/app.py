@@ -33,12 +33,13 @@ class ScrapeCounts:
 
     inserted: int = 0
     updated: int = 0
+    unchanged: int = 0
     failed: int = 0
     skipped: int = 0
 
     @property
     def processed(self) -> int:
-        return self.inserted + self.updated + self.failed
+        return self.inserted + self.updated + self.unchanged + self.failed
 
 
 def _logger(level: str) -> logging.Logger:
@@ -126,6 +127,7 @@ def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> 
 
     inserted = 0
     updated = 0
+    unchanged = 0
     failed = 0
     skipped = max(0, len(job_posts) - len(job_urls))
     processable = min(len(job_posts), len(job_urls))
@@ -133,8 +135,14 @@ def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> 
         post = job_posts[index]
         try:
             details = parse_job_details(post.split("\n"), job_url=job_urls[index])
-            cursor.execute("SELECT COUNT(*) FROM jobs WHERE job_id = ?", (details["job_id"],))
-            if cursor.fetchone()[0]:
+            cursor.execute("SELECT job_proposals FROM jobs WHERE job_id = ?", (details["job_id"],))
+            existing = cursor.fetchone()
+            if existing is not None:
+                stored_proposals = existing[0] or ""
+                scraped_proposals = details["job_proposals"] or ""
+                if stored_proposals == scraped_proposals:
+                    unchanged += 1
+                    continue
                 cursor.execute(
                     "UPDATE jobs SET job_proposals = ?, updated_at = ? WHERE job_id = ?",
                     (details["job_proposals"], datetime.now(), details["job_id"]),
@@ -161,14 +169,15 @@ def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> 
             logger.warning("Job %d/%d failed: %s", index + 1, processable, exc)
         if (index + 1) % 5 == 0 or index + 1 == processable:
             logger.info(
-                "Processed %d/%d jobs (%d inserted, %d updated, %d failed)",
+                "Processed %d/%d jobs (%d inserted, %d updated, %d unchanged, %d failed)",
                 index + 1,
                 len(job_posts),
                 inserted,
                 updated,
+                unchanged,
                 failed,
             )
-    return ScrapeCounts(inserted, updated, failed, skipped)
+    return ScrapeCounts(inserted, updated, unchanged, failed, skipped)
 
 
 def main(argv: list[str] | None = None) -> bool:
@@ -247,10 +256,11 @@ def main(argv: list[str] | None = None) -> bool:
         conn.commit()
         logger.info(
             "Scraping completed: %d job posts processed (%d inserted, %d updated, "
-            "%d failed, %d skipped); database commit succeeded",
+            "%d unchanged, %d failed, %d skipped); database commit succeeded",
             counts.processed,
             counts.inserted,
             counts.updated,
+            counts.unchanged,
             counts.failed,
             counts.skipped,
         )

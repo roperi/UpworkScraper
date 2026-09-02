@@ -126,16 +126,32 @@ def test_process_jobs_counts_insert_update_failure_and_skipped(monkeypatch):
     cursor = conn.cursor()
     create_db(conn, cursor)
     cursor.execute(
-        "INSERT INTO jobs (job_id, job_url, job_title, job_description, job_proposals) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("existing", "old-url", "Existing", "Description", "old proposals"),
+        "INSERT INTO jobs (job_id, job_url, job_title, job_description, job_proposals, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("existing", "old-url", "Existing", "Description", "old proposals", "2020-01-01"),
+    )
+    cursor.execute(
+        "INSERT INTO jobs (job_id, job_url, job_title, job_description, job_proposals, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "unchanged",
+            "old-unchanged-url",
+            "Unchanged",
+            "Description",
+            "old proposals",
+            "2020-01-02",
+        ),
     )
     logger = FakeLogger()
 
     def fake_parse(_rows, job_url):
-        job_id = "existing" if job_url == "existing-url" else "new"
+        job_id = {
+            "existing-url": "existing",
+            "unchanged-url": "unchanged",
+        }.get(job_url, "new")
         if job_url == "failed-url":
             raise ValueError("invalid job")
+        proposals = "old proposals" if job_url == "unchanged-url" else "new proposals"
         return {
             "job_id": job_id,
             "job_url": job_url,
@@ -143,22 +159,30 @@ def test_process_jobs_counts_insert_update_failure_and_skipped(monkeypatch):
             "posted_date": None,
             "job_description": "Description",
             "job_tags": "[]",
-            "job_proposals": "new proposals",
+            "job_proposals": proposals,
         }
 
     monkeypatch.setattr(app, "parse_job_details", fake_parse)
     counts = app._process_jobs(
-        ["new post", "existing post", "failed post", "unmatched post"],
-        ["new-url", "existing-url", "failed-url"],
+        ["new post", "existing post", "unchanged post", "failed post", "unmatched post"],
+        ["new-url", "existing-url", "unchanged-url", "failed-url"],
         cursor,
         logger,
     )
     conn.commit()
 
-    assert counts == app.ScrapeCounts(inserted=1, updated=1, failed=1, skipped=1)
-    assert cursor.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 2
+    assert counts == app.ScrapeCounts(inserted=1, updated=1, unchanged=1, failed=1, skipped=1)
+    assert cursor.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 3
     assert (
         cursor.execute("SELECT job_proposals FROM jobs WHERE job_id = 'existing'").fetchone()[0]
         == "new proposals"
+    )
+    assert (
+        cursor.execute("SELECT updated_at FROM jobs WHERE job_id = 'existing'").fetchone()[0]
+        != "2020-01-01"
+    )
+    assert (
+        cursor.execute("SELECT updated_at FROM jobs WHERE job_id = 'unchanged'").fetchone()[0]
+        == "2020-01-02"
     )
     assert any(level == "warning" for level, _ in logger.messages)
