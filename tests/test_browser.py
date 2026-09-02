@@ -51,5 +51,6 @@ def test_launch_passes_profile_and_proxy_to_chrome(monkeypatch, tmp_path) -> Non
     result = browser._launch_with_driver(settings, spec)
 
     assert result["options"] is options
+    assert options.page_load_strategy == "eager"
     assert options.user_data_dir == str(tmp_path / "profile")
     assert "--proxy-server=socks5://127.0.0.1:1080" in options.arguments

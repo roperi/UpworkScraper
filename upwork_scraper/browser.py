@@ -79,6 +79,7 @@ def _cache_driver(driver, destination: Path) -> None:
 def _launch_with_driver(settings: Settings, spec: BrowserSpec, driver_path: Path | None = None):
     options = uc.ChromeOptions()
     options.headless = False
+    options.page_load_strategy = "eager"
     options.add_argument("--disable-dev-shm-usage")
     options.user_data_dir = str(settings.browser_profile_dir)
     if settings.proxy_server:

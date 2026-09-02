@@ -84,6 +84,15 @@ def test_login_reuses_authenticated_profile_on_best_matches(monkeypatch):
 
     auth.login(driver, settings, lambda _message: None)
 
+    assert driver.visited_urls == []
+
+
+def test_login_navigates_authenticated_profile_to_best_matches():
+    driver = FakeDriver("https://www.upwork.com/nx/find-work/home")
+    settings = Settings(username="user@example.com", password="secret", first_name="FirstName")
+
+    auth.login(driver, settings, lambda _message: None)
+
     assert driver.visited_urls == [BEST_MATCHES_URL]
 
 
@@ -94,7 +103,7 @@ def test_login_handles_authenticated_redirect_from_login_url(monkeypatch):
 
     auth.login(driver, settings, lambda _message: None)
 
-    assert driver.visited_urls == [LOGIN_URL, BEST_MATCHES_URL]
+    assert driver.visited_urls == [LOGIN_URL]
 
 
 def test_login_warning_detects_security_interstitials():

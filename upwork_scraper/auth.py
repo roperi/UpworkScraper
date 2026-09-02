@@ -80,6 +80,16 @@ def _authenticated(driver) -> bool:
         raise RuntimeError("Chrome closed the browser session during authentication") from exc
 
 
+def _at_best_matches(driver) -> bool:
+    parsed_url = urlsplit(driver.current_url)
+    return parsed_url.path.rstrip("/") == "/nx/find-work/best-matches"
+
+
+def _go_to_best_matches(driver) -> None:
+    if not _at_best_matches(driver):
+        driver.get(BEST_MATCHES_URL)
+
+
 def _visible_element_by_id(driver, element_id: str):
     try:
         return next((e for e in driver.find_elements(By.ID, element_id) if e.is_displayed()), None)
@@ -107,7 +117,7 @@ def _login_warning(text: str) -> str | None:
 
 def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
     if _authenticated(driver):
-        driver.get(BEST_MATCHES_URL)
+        _go_to_best_matches(driver)
         return
 
     driver.get(LOGIN_URL)
@@ -116,7 +126,7 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
         lambda d: _authenticated(d) or _visible_element_by_id(d, "login_username")
     )
     if login_step is True:
-        driver.get(BEST_MATCHES_URL)
+        _go_to_best_matches(driver)
         return
 
     username = login_step
@@ -152,7 +162,7 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
     reported_warning: str | None = None
     while time.monotonic() < deadline:
         if _authenticated(driver):
-            driver.get(BEST_MATCHES_URL)
+            _go_to_best_matches(driver)
             return
         text = _body_text(driver).lower()
         warning = _login_warning(text)

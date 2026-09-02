@@ -237,6 +237,7 @@ def main(argv: list[str] | None = None) -> bool:
         logger.info("Using %s (%s)", browser.executable, browser.version)
         logger.info("Checking Upwork authentication")
         login(driver, settings, lambda message: logger.warning(message))
+        logger.info("Upwork authentication ready")
 
         _load_job_list(driver, logger)
 
