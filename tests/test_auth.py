@@ -99,7 +99,11 @@ def test_login_navigates_authenticated_profile_to_best_matches():
 def test_login_handles_authenticated_redirect_from_login_url(monkeypatch):
     driver = FakeDriver("about:blank", redirect_url=BEST_MATCHES_URL)
     settings = Settings(username="user@example.com", password="secret", first_name="FirstName")
-    monkeypatch.setattr(auth, "_dismiss_cookie_consent", lambda _driver: None)
+
+    def unexpected_cookie_scan(_driver):
+        raise AssertionError("authenticated redirects must skip cookie scanning")
+
+    monkeypatch.setattr(auth, "_dismiss_cookie_consent", unexpected_cookie_scan)
 
     auth.login(driver, settings, lambda _message: None)
 

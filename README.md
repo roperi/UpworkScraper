@@ -140,6 +140,18 @@ UPWORK_PASSWORD=replace-me
   verification can be reused on later runs. Do not use the profile directory
   concurrently from multiple scraper processes.
 
+### Browser profile and login sessions
+
+Upwork Scraper uses a dedicated persistent browser profile by default. On the first run, the
+visible browser may require your Upwork credentials, Google or Apple login, security verification,
+or two-step verification. Once authentication succeeds, later runs may reuse that session and open
+directly on **Best Matches** without displaying the login form.
+
+If Upwork expires or invalidates the saved session, the login page will appear again and the normal
+credential or manual verification flow will be used. The browser profile contains sensitive session
+data: do not share it, commit it, or point `UPWORK_BROWSER_PROFILE_DIR` at your personal Chrome or
+Chromium profile. Do not run multiple scraper processes against the same profile concurrently.
+
 The browser major version is detected automatically. Users should not normally maintain a Chrome version list.
 
 If Upwork reports network restrictions, configure the same stable proxy route that works in

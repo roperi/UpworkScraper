@@ -40,7 +40,10 @@ def _dismiss_cookie_consent(driver) -> None:
     """Dismiss the consent overlay on a fresh automation profile."""
 
     for _ in range(10):
-        buttons = driver.find_elements(By.TAG_NAME, "button")
+        buttons = driver.find_elements(
+            By.XPATH,
+            "//button[normalize-space()='Reject All' or normalize-space()='Accept All']",
+        )
         consent = next(
             (
                 button
@@ -121,7 +124,6 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
         return
 
     driver.get(LOGIN_URL)
-    _dismiss_cookie_consent(driver)
     login_step = WebDriverWait(driver, 30).until(
         lambda d: _authenticated(d) or _visible_element_by_id(d, "login_username")
     )
@@ -129,6 +131,7 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
         _go_to_best_matches(driver)
         return
 
+    _dismiss_cookie_consent(driver)
     username = login_step
     username.clear()
     username.send_keys(settings.username)
