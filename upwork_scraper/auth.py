@@ -60,6 +60,29 @@ def _dismiss_cookie_consent(driver) -> None:
         time.sleep(0.5)
 
 
+def _retry_on_invalid_state(driver, element_id: str, use_element, attempts: int = 4):
+    """Run ``use_element(element)`` while Upwork settles the login page.
+
+    A field can be briefly covered by consent or spinner overlays, making it
+    visible but not interactable. Refreshing the element and retrying a few
+    times recovers from this without failing the whole run.
+    """
+
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        element = _visible_element_by_id(driver, element_id)
+        if element is None:
+            last_error = RuntimeError(f"{element_id} is no longer visible")
+        else:
+            try:
+                return use_element(element)
+            except Exception as exc:
+                last_error = exc
+        if attempt < attempts - 1:
+            time.sleep(1.5)
+    raise last_error  # type: ignore[misc]
+
+
 def _click_submit(driver, field) -> None:
     button = _visible_button(driver)
     if button is not None:
@@ -132,10 +155,17 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
         return
 
     _dismiss_cookie_consent(driver)
-    username = login_step
-    username.clear()
-    username.send_keys(settings.username)
-    _click_submit(driver, username)
+
+    _retry_on_invalid_state(
+        driver,
+        "login_username",
+        lambda field: (field.clear(), field.send_keys(settings.username)),
+    )
+    _retry_on_invalid_state(
+        driver,
+        "login_username",
+        lambda field: _click_submit(driver, field),
+    )
 
     password = None
     if settings.password is not None:
@@ -157,9 +187,16 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
         )
 
     if password is not None:
-        password.clear()
-        password.send_keys(settings.password)
-        _click_submit(driver, password)
+        _retry_on_invalid_state(
+            driver,
+            "login_password",
+            lambda field: (field.clear(), field.send_keys(settings.password)),
+        )
+        _retry_on_invalid_state(
+            driver,
+            "login_password",
+            lambda field: _click_submit(driver, field),
+        )
 
     deadline = time.monotonic() + settings.verification_timeout
     reported_warning: str | None = None
