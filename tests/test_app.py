@@ -80,24 +80,20 @@ def test_job_urls_are_filtered_and_normalized():
 
 
 def test_load_job_list_waits_for_stable_empty_results(monkeypatch):
-    class Body:
+    class Driver:
         def __init__(self):
             self.scrolls = 0
 
-        def send_keys(self, _key):
-            self.scrolls += 1
+        def find_element(self, _by, _name):
+            return SimpleNamespace(is_displayed=lambda: True)
 
-    class Driver:
-        def __init__(self):
-            self.body = Body()
-
-        def find_element(self, _by, name):
-            return self.body if name == "body" else SimpleNamespace(is_displayed=lambda: True)
-
-        def execute_script(self, script):
-            if "querySelectorAll" in script:
-                return []
-            return None
+        def execute_script(self, script, *arguments):
+            if ("scrollTop" in script and arguments) or "scrollBy" in script:
+                self.scrolls += 1
+                return None
+            if "scrollHeight > n.clientHeight" in script:
+                return None
+            return []
 
     class ImmediateWait:
         def __init__(self, driver, _timeout, poll_frequency=None):
@@ -117,7 +113,7 @@ def test_load_job_list_waits_for_stable_empty_results(monkeypatch):
 
     app._load_job_list(driver, logger)
 
-    assert driver.body.scrolls == 2
+    assert driver.scrolls == 2
     assert any("Job list loaded" in message[0] for _, message in logger.messages)
 
 

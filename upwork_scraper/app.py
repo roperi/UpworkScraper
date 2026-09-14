@@ -11,7 +11,6 @@ from datetime import datetime
 from pathlib import Path
 
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -80,12 +79,44 @@ def _job_urls(driver) -> list[str]:
     return [href.split("?", 1)[0].rstrip("/") for href in hrefs if "ontology_skill_uid" not in href]
 
 
+def _feed_container(driver):
+    """Return the scrollable job-feed container, falling back to window scroll."""
+
+    return driver.execute_script(
+        """
+        const candidates = Array.from(document.querySelectorAll('div, main, section'))
+          .filter(n => n.scrollHeight > n.clientHeight + 100 && n.clientHeight > 300);
+        if (!candidates.length) return null;
+        candidates.sort((a, b) => b.scrollHeight - a.scrollHeight);
+        return candidates[0];
+        """
+    )
+
+
+def _scroll_feed(driver, container) -> None:
+    """Send a real mouse-wheel event; synthesized scrollTop does not trigger
+    the feed's lazy loader, but Chromium's wheel input does."""
+
+    if container is None:
+        driver.execute_script("window.scrollBy(0, window.innerHeight);")
+        return
+    rect = driver.execute_script(
+        "const r = arguments[0].getBoundingClientRect();"
+        "return {x: r.x + r.width / 2, y: Math.max(r.y + r.height / 2, 0)};",
+        container,
+    )
+    driver.execute_cdp_cmd(
+        "Input.dispatchMouseEvent",
+        {"type": "mouseWheel", "x": rect["x"], "y": rect["y"], "deltaX": 0, "deltaY": 600},
+    )
+
+
 def _load_job_list(driver, logger: logging.Logger) -> None:
     """Scroll through results and wait briefly for lazy-loaded jobs to settle."""
 
-    body = driver.find_element(By.TAG_NAME, "body")
+    container = _feed_container(driver)
     for step in range(1, SCROLL_STEPS + 1):
-        body.send_keys(Keys.PAGE_DOWN)
+        _scroll_feed(driver, container)
         time.sleep(SCROLL_PAUSE_SECONDS)
         logger.info(
             "Loading jobs: scroll %d/%d; %d job links visible",
@@ -94,9 +125,11 @@ def _load_job_list(driver, logger: logging.Logger) -> None:
             len(_job_urls(driver)),
         )
 
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    if container is not None:
+        driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", container)
+    else:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
     WebDriverWait(driver, 120).until(EC.visibility_of_element_located((By.TAG_NAME, "footer")))
-
     previous_count = -1
     stable_polls = 0
 
@@ -242,9 +275,7 @@ def main(argv: list[str] | None = None) -> bool:
         _load_job_list(driver, logger)
 
         jobs_container = WebDriverWait(driver, 30).until(
-            EC.presence_of_all_elements_located(
-                (By.XPATH, "/html/body/div[3]/div/div/div[1]/div[2]/div/div/main/div")
-            )
+            EC.presence_of_all_elements_located((By.XPATH, "//main/div"))
         )[-1]
         text = jobs_container.text
         if settings.first_name:
