@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import time
 from argparse import ArgumentParser
@@ -73,10 +74,33 @@ def _arguments(argv: list[str] | None):
 
 
 def _job_urls(driver) -> list[str]:
-    hrefs = driver.execute_script(
-        "return Array.from(document.querySelectorAll(\"a[href*='/jobs/']\"), link => link.href);"
+    """Build canonical job URLs from the feed tiles.
+
+    Upwork no longer links job titles to ``/jobs/`` pages. Each tile still
+    carries the opening UID, and the job cipher is ``~02`` followed by it.
+    """
+
+    tiles = driver.execute_script(
+        """
+        return Array.from(document.querySelectorAll('[data-test="job-tile"]')).map(tile => {
+            const tracker = tile.querySelector('[data-ev-opening_uid]');
+            const title = tile.querySelector('[data-test="job-title"]');
+            if (!tracker || !title) return null;
+            return {
+                uid: tracker.getAttribute('data-ev-opening_uid'),
+                title: title.textContent.trim(),
+            };
+        }).filter(Boolean);
+        """
     )
-    return [href.split("?", 1)[0].rstrip("/") for href in hrefs if "ontology_skill_uid" not in href]
+    urls = []
+    for tile in tiles:
+        uid = tile.get("uid")
+        if not uid:
+            continue
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", tile.get("title") or "").strip("-")
+        urls.append(f"https://www.upwork.com/jobs/{slug}_~02{uid}")
+    return urls
 
 
 def _feed_container(driver):
@@ -111,20 +135,33 @@ def _scroll_feed(driver, container) -> None:
     )
 
 
+def _scroll_offset(driver, container) -> int:
+    """Report the real scroll position so the log reflects actual movement."""
+
+    if container is None:
+        return driver.execute_script("return Math.round(window.scrollY);")
+    return driver.execute_script("return Math.round(arguments[0].scrollTop);", container)
+
+
 def _load_job_list(driver, logger: logging.Logger) -> None:
     """Scroll through results and wait briefly for lazy-loaded jobs to settle."""
 
-    container = _feed_container(driver)
     for step in range(1, SCROLL_STEPS + 1):
+        # The feed renders asynchronously, so the scroll container may not
+        # exist yet on the first steps. Rediscover it every step instead of
+        # caching a None/decoy and silently no-op'ing the rest of the run.
+        container = _feed_container(driver)
         _scroll_feed(driver, container)
         time.sleep(SCROLL_PAUSE_SECONDS)
         logger.info(
-            "Loading jobs: scroll %d/%d; %d job links visible",
+            "Loading jobs: scroll %d/%d; %d job links visible; offset %d",
             step,
             SCROLL_STEPS,
             len(_job_urls(driver)),
+            _scroll_offset(driver, container),
         )
 
+    container = _feed_container(driver)
     if container is not None:
         driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", container)
     else:
@@ -280,7 +317,6 @@ def main(argv: list[str] | None = None) -> bool:
         text = jobs_container.text
         if settings.first_name:
             text = text.split(settings.first_name)[0]
-        text = text.split("Ordered by most relevant.")[-1]
         job_posts = text.split("Posted")[1:]
         job_urls = _job_urls(driver)
         logger.info("Parsed %d job posts and found %d job links", len(job_posts), len(job_urls))

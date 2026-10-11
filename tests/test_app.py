@@ -64,18 +64,22 @@ def test_cli_converts_failure_to_one(monkeypatch):
     assert app.cli() == 1
 
 
-def test_job_urls_are_filtered_and_normalized():
+def test_job_urls_are_built_from_feed_tiles():
     class Driver:
         def execute_script(self, _script):
             return [
-                "https://www.upwork.com/jobs/first_~abc/?foo=bar",
-                "https://www.upwork.com/jobs/skill_~def?ontology_skill_uid=123",
-                "https://www.upwork.com/jobs/second_~ghi/?foo=bar",
+                {
+                    "uid": "2105718172637605907",
+                    "title": "PromptOps Engineer for Deterministic AI Agents",
+                },
+                {"uid": None, "title": "Missing opening UID"},
+                {"uid": "2105364230841134304", "title": "Build HIPAA-Compliant AI system"},
             ]
 
     assert app._job_urls(Driver()) == [
-        "https://www.upwork.com/jobs/first_~abc",
-        "https://www.upwork.com/jobs/second_~ghi",
+        "https://www.upwork.com/jobs/PromptOps-Engineer-for-Deterministic-AI-Agents"
+        "_~022105718172637605907",
+        "https://www.upwork.com/jobs/Build-HIPAA-Compliant-AI-system_~022105364230841134304",
     ]
 
 
