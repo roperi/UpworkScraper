@@ -31,6 +31,12 @@ def extract_title_from_url(url: str | None) -> str | None:
         return None
 
 
+def _word_set(text: str) -> set[str]:
+    """Split text into lowercase words, ignoring punctuation and hyphens."""
+
+    return set(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+
+
 def generate_job_id(job_title: str, job_url: str | None = None, job_description: str = "") -> str:
     """Generate a stable job ID, preferring Upwork's URL cipher."""
 
@@ -133,12 +139,14 @@ def parse_job_details(rows: list[str], job_url: str | None = None) -> dict:
     title = ""
     url_title_hint = extract_title_from_url(job_url)
     if url_title_hint:
-        hint_words = set(url_title_hint.lower().split())
+        hint_words = _word_set(url_title_hint)
         for item in rows:
             value = item.strip()
             if not value or len(value) > 150:
                 continue
-            item_words = set(value.lower().split())
+            item_words = _word_set(value)
+            if not item_words:
+                continue
             if hint_words.issubset(item_words) or item_words.issubset(hint_words):
                 title = value
                 break

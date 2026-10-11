@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import time
 from argparse import ArgumentParser
@@ -73,10 +74,33 @@ def _arguments(argv: list[str] | None):
 
 
 def _job_urls(driver) -> list[str]:
-    hrefs = driver.execute_script(
-        "return Array.from(document.querySelectorAll(\"a[href*='/jobs/']\"), link => link.href);"
+    """Build canonical job URLs from the feed tiles.
+
+    Upwork no longer links job titles to ``/jobs/`` pages. Each tile still
+    carries the opening UID, and the job cipher is ``~02`` followed by it.
+    """
+
+    tiles = driver.execute_script(
+        """
+        return Array.from(document.querySelectorAll('[data-test="job-tile"]')).map(tile => {
+            const tracker = tile.querySelector('[data-ev-opening_uid]');
+            const title = tile.querySelector('[data-test="job-title"]');
+            if (!tracker || !title) return null;
+            return {
+                uid: tracker.getAttribute('data-ev-opening_uid'),
+                title: title.textContent.trim(),
+            };
+        }).filter(Boolean);
+        """
     )
-    return [href.split("?", 1)[0].rstrip("/") for href in hrefs if "ontology_skill_uid" not in href]
+    urls = []
+    for tile in tiles:
+        uid = tile.get("uid")
+        if not uid:
+            continue
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", tile.get("title") or "").strip("-")
+        urls.append(f"https://www.upwork.com/jobs/{slug}_~02{uid}")
+    return urls
 
 
 def _feed_container(driver):
@@ -280,7 +304,6 @@ def main(argv: list[str] | None = None) -> bool:
         text = jobs_container.text
         if settings.first_name:
             text = text.split(settings.first_name)[0]
-        text = text.split("Ordered by most relevant.")[-1]
         job_posts = text.split("Posted")[1:]
         job_urls = _job_urls(driver)
         logger.info("Parsed %d job posts and found %d job links", len(job_posts), len(job_urls))
