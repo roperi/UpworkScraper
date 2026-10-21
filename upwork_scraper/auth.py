@@ -10,6 +10,7 @@ from selenium.common.exceptions import (
     InvalidSessionIdException,
     StaleElementReferenceException,
     TimeoutException,
+    WebDriverException,
 )
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -21,19 +22,138 @@ LOGIN_URL = "https://www.upwork.com/ab/account-security/login"
 BEST_MATCHES_URL = "https://www.upwork.com/nx/find-work/best-matches"
 PASSWORD_STEP_TIMEOUT = 30
 
+# Upwork's current login form uses ``#username_username``; older sessions and
+# A/B variants still expose ``#login_username``.
+USERNAME_FIELD_IDS = ("username_username", "login_username")
+PASSWORD_FIELD_IDS = ("login_password",)
+USERNAME_SUBMIT_IDS = ("username_password_continue",)
+PASSWORD_SUBMIT_IDS = ("login_control_continue",)
+SUBMIT_LABELS = {"Continue", "Log in", "Sign in"}
+TURNSTILE_RESPONSE_SELECTOR = 'input[name="cf-turnstile-response"]'
+CLOUDFLARE_CHALLENGE_JS = """
+const interstitial = document.querySelector(
+  '.up-challenge-container, #challenge-form, #cf-challenge-running, .cf-browser-verification'
+);
+if (interstitial) return true;
+const title = (document.title || '').toLowerCase();
+return title.includes('just a moment') || title === 'challenge - upwork';
+"""
 
-def _visible_button(driver):
-    for button in driver.find_elements(By.CSS_SELECTOR, "form#login button"):
+
+def _visible_button(driver, button_ids=()):
+    for button_id in button_ids:
+        button = _visible_element_by_id(driver, button_id)
+        if button is None:
+            continue
+        try:
+            if button.is_enabled():
+                return button
+        except StaleElementReferenceException:
+            continue
+    for button in driver.find_elements(By.CSS_SELECTOR, "form button"):
         try:
             if (
                 button.is_displayed()
                 and button.is_enabled()
-                and button.text.strip() in {"Continue", "Log in", "Sign in"}
+                and button.text.strip() in SUBMIT_LABELS
             ):
                 return button
         except StaleElementReferenceException:
             continue
     return None
+
+
+def _visible_element(driver, element_ids):
+    for element_id in element_ids:
+        element = _visible_element_by_id(driver, element_id)
+        if element is not None:
+            return element
+    return None
+
+
+def _cloudflare_challenge(driver) -> bool:
+    """Report whether Cloudflare is still showing its interstitial page."""
+
+    try:
+        return bool(driver.execute_script(CLOUDFLARE_CHALLENGE_JS))
+    except InvalidSessionIdException:
+        raise
+    except WebDriverException:
+        # A navigation can destroy the execution context mid-check.
+        return False
+
+
+def _turnstile_token(driver) -> str | None:
+    """Return the Turnstile token, or ``None`` when the widget is absent."""
+
+    tokens = driver.find_elements(By.CSS_SELECTOR, TURNSTILE_RESPONSE_SELECTOR)
+    if not tokens:
+        return None
+    try:
+        return (tokens[0].get_attribute("value") or "").strip()
+    except StaleElementReferenceException:
+        # Cloudflare can replace the widget while the check completes.
+        return ""
+
+
+def _submit_ready(driver, button_ids):
+    """Return an enabled submit button once Turnstile has issued its token."""
+
+    button = _visible_button(driver, button_ids)
+    if button is None or _turnstile_token(driver) == "":
+        return None
+    return button
+
+
+def _wait_for_submit(driver, button_ids, timeout: int, logger):
+    """Wait for Upwork's invisible Turnstile check before submitting a step.
+
+    The redesigned form keeps its submit button disabled until Cloudflare's
+    widget produces ``cf-turnstile-response``. Clicking while the check is
+    running leaves the form on the same step and later times out.
+    """
+
+    deadline = time.monotonic() + timeout
+    challenge_reported = False
+    while time.monotonic() < deadline:
+        button = _submit_ready(driver, button_ids)
+        if button is not None:
+            return button
+        if _turnstile_token(driver) == "" and not challenge_reported:
+            logger("Cloudflare is verifying the browser; waiting for the check to finish")
+            challenge_reported = True
+        time.sleep(0.5)
+    raise TimeoutException(
+        "Cloudflare verification did not finish within "
+        f"{timeout} seconds; current URL: {driver.current_url}"
+    )
+
+
+def _wait_for_login_field(driver, timeout: int, logger):
+    """Wait out Cloudflare and return the first login step.
+
+    Returns ``True`` when the persistent profile is already authenticated and
+    the username field element otherwise.
+    """
+
+    deadline = time.monotonic() + timeout
+    challenge_reported = False
+    while time.monotonic() < deadline:
+        if _authenticated(driver):
+            return True
+        if _cloudflare_challenge(driver):
+            if not challenge_reported:
+                logger("Cloudflare is verifying the browser; waiting for the login page")
+                challenge_reported = True
+        else:
+            field = _visible_element(driver, USERNAME_FIELD_IDS)
+            if field is not None:
+                return field
+        time.sleep(0.5)
+    raise TimeoutException(
+        "Upwork did not display the login form within "
+        f"{timeout} seconds; current URL: {driver.current_url}"
+    )
 
 
 def _dismiss_cookie_consent(driver) -> None:
@@ -60,7 +180,7 @@ def _dismiss_cookie_consent(driver) -> None:
         time.sleep(0.5)
 
 
-def _retry_on_invalid_state(driver, element_id: str, use_element, attempts: int = 4):
+def _retry_on_invalid_state(driver, element_ids, use_element, attempts: int = 4):
     """Run ``use_element(element)`` while Upwork settles the login page.
 
     A field can be briefly covered by consent or spinner overlays, making it
@@ -69,10 +189,11 @@ def _retry_on_invalid_state(driver, element_id: str, use_element, attempts: int 
     """
 
     last_error: Exception | None = None
+    label = "/".join(element_ids)
     for attempt in range(attempts):
-        element = _visible_element_by_id(driver, element_id)
+        element = _visible_element(driver, element_ids)
         if element is None:
-            last_error = RuntimeError(f"{element_id} is no longer visible")
+            last_error = RuntimeError(f"{label} is no longer visible")
         else:
             try:
                 return use_element(element)
@@ -83,8 +204,8 @@ def _retry_on_invalid_state(driver, element_id: str, use_element, attempts: int 
     raise last_error  # type: ignore[misc]
 
 
-def _click_submit(driver, field) -> None:
-    button = _visible_button(driver)
+def _click_submit(driver, field, button_ids, timeout: int, logger) -> None:
+    button = _wait_for_submit(driver, button_ids, timeout, logger)
     if button is not None:
         button.click()
     else:
@@ -119,7 +240,10 @@ def _go_to_best_matches(driver) -> None:
 def _visible_element_by_id(driver, element_id: str):
     try:
         return next((e for e in driver.find_elements(By.ID, element_id) if e.is_displayed()), None)
-    except StaleElementReferenceException:
+    except InvalidSessionIdException:
+        raise
+    except WebDriverException:
+        # The document can be replaced while Cloudflare reloads the page.
         return None
 
 
@@ -147,9 +271,7 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
         return
 
     driver.get(LOGIN_URL)
-    login_step = WebDriverWait(driver, 30).until(
-        lambda d: _authenticated(d) or _visible_element_by_id(d, "login_username")
-    )
+    login_step = _wait_for_login_field(driver, settings.verification_timeout, logger)
     if login_step is True:
         _go_to_best_matches(driver)
         return
@@ -158,20 +280,22 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
 
     _retry_on_invalid_state(
         driver,
-        "login_username",
+        USERNAME_FIELD_IDS,
         lambda field: (field.clear(), field.send_keys(settings.username)),
     )
     _retry_on_invalid_state(
         driver,
-        "login_username",
-        lambda field: _click_submit(driver, field),
+        USERNAME_FIELD_IDS,
+        lambda field: _click_submit(
+            driver, field, USERNAME_SUBMIT_IDS, settings.verification_timeout, logger
+        ),
     )
 
     password = None
     if settings.password is not None:
         try:
             password_step = WebDriverWait(driver, PASSWORD_STEP_TIMEOUT).until(
-                lambda d: _authenticated(d) or _visible_element_by_id(d, "login_password")
+                lambda d: _authenticated(d) or _visible_element(d, PASSWORD_FIELD_IDS)
             )
             if password_step is not True:
                 password = password_step
@@ -189,21 +313,27 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
     if password is not None:
         _retry_on_invalid_state(
             driver,
-            "login_password",
+            PASSWORD_FIELD_IDS,
             lambda field: (field.clear(), field.send_keys(settings.password)),
         )
         _retry_on_invalid_state(
             driver,
-            "login_password",
-            lambda field: _click_submit(driver, field),
+            PASSWORD_FIELD_IDS,
+            lambda field: _click_submit(
+                driver, field, PASSWORD_SUBMIT_IDS, settings.verification_timeout, logger
+            ),
         )
 
     deadline = time.monotonic() + settings.verification_timeout
     reported_warning: str | None = None
+    challenge_reported = False
     while time.monotonic() < deadline:
         if _authenticated(driver):
             _go_to_best_matches(driver)
             return
+        if not challenge_reported and _cloudflare_challenge(driver):
+            logger("Cloudflare is verifying the browser; waiting for it to finish")
+            challenge_reported = True
         text = _body_text(driver).lower()
         warning = _login_warning(text)
         if warning is not None and warning != reported_warning:

@@ -27,6 +27,12 @@ import paths changed.
 - SQLite is the only supported persistence format.
 - `UPWORK_FIRST_NAME` is required for reliable job-results parsing.
 
+### Fixed
+
+- Login follows Upwork's redesigned two-step form and waits for the Cloudflare Turnstile check
+  before submitting each step, instead of timing out while the old `#login_username` form was
+  replaced.
+
 ### Removed
 
 - Legacy `settings/config.py`.
