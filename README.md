@@ -152,6 +152,12 @@ credential or manual verification flow will be used. The browser profile contain
 data: do not share it, commit it, or point `UPWORK_BROWSER_PROFILE_DIR` at your personal Chrome or
 Chromium profile. Do not run multiple scraper processes against the same profile concurrently.
 
+Upwork’s login form includes a Cloudflare Turnstile panel. It verifies the browser automatically:
+the form and its Continue button are disabled until the check finishes. The scraper waits for that
+check to complete before submitting each step, so no manual action is normally required. A persistent
+browser profile usually keeps the Cloudflare clearance cookie and skips the visible check on later
+runs.
+
 The browser major version is detected automatically. Users should not normally maintain a Chrome version list.
 
 If Upwork reports network restrictions, configure the same stable proxy route that works in
