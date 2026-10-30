@@ -32,9 +32,13 @@ def test_launch_passes_profile_and_proxy_to_chrome(monkeypatch, tmp_path) -> Non
         def __init__(self):
             self.arguments = []
             self.user_data_dir = None
+            self.capabilities = {}
 
         def add_argument(self, argument):
             self.arguments.append(argument)
+
+        def set_capability(self, name, value):
+            self.capabilities[name] = value
 
     options = FakeOptions()
     monkeypatch.setattr(browser.uc, "ChromeOptions", lambda: options)
@@ -54,3 +58,4 @@ def test_launch_passes_profile_and_proxy_to_chrome(monkeypatch, tmp_path) -> Non
     assert options.page_load_strategy == "eager"
     assert options.user_data_dir == str(tmp_path / "profile")
     assert "--proxy-server=socks5://127.0.0.1:1080" in options.arguments
+    assert options.capabilities["goog:loggingPrefs"] == {"performance": "ALL"}

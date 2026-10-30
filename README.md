@@ -158,6 +158,33 @@ check to complete before submitting each step, so no manual action is normally r
 browser profile usually keeps the Cloudflare clearance cookie and skips the visible check on later
 runs.
 
+### Cloudflare block pages
+
+Occasionally Cloudflare serves its **"Sorry, you have been blocked"** / **"Attention Required!"** page
+instead of Upwork. That page is a request refusal, not a login failure: the request never reaches
+Upwork, so no cookie, reload, or wait inside the browser will get past it. It is Cloudflare's bot
+scoring rejecting the automated browser session. The same machine and network usually still load
+Upwork normally in Chrome, and a `curl` request from that machine is blocked outright, so it does not
+indicate a network fault.
+
+The scraper detects that page and stops immediately with a message naming the block instead of
+scrolling an empty feed. Every run also logs the HTTP outcome of each Upwork document load,
+including the status, `cf-ray`, `cf-mitigated`, and `retry-after` values, for example:
+
+```
+[INFO] Response 403 for https://www.upwork.com/nx/find-work/best-matches (cf-ray=9d2f...-LHR, cf-mitigated=challenge)
+[INFO] Response 200 for https://www.upwork.com/nx/s/find-work/best-matches (cf-ray=9d2f...-LHR, cf-mitigated=-)
+```
+
+Because each retry from the same session extends the block:
+
+* Do not re-run the scraper in a loop after a block. Wait several minutes and try once.
+* Confirm the network is fine by opening Upwork in your normal browser.
+* Reusing an aged browser profile helps: log in once manually in the scraper's visible browser and
+  browse a little, so the profile carries normal cookies before automated runs reuse it.
+* A proxy (`UPWORK_PROXY_SERVER`) only helps when the route itself is the problem. If your normal
+  browser works from the same connection, changing proxies will not raise the automation score.
+
 The browser major version is detected automatically. Users should not normally maintain a Chrome version list.
 
 If Upwork reports network restrictions, configure the same stable proxy route that works in

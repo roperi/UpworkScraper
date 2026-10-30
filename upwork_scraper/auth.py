@@ -40,6 +40,58 @@ return title.includes('just a moment') || title === 'challenge - upwork';
 """
 
 
+BLOCKED_PAGE_JS = """
+const title = (document.title || '').toLowerCase();
+if (title.includes('attention required') || title.includes('access denied')) return true;
+// Cloudflare's block page is a few kilobytes of plain HTML. Bail out on large
+// documents first so checking a loaded feed does not pay for a layout pass.
+const text = ((document.body && document.body.textContent) || '').toLowerCase();
+if (text.length > 50000) return false;
+return text.includes('you have been blocked')
+  || text.includes('unable to access upwork.com')
+  || text.includes('why have i been blocked');
+"""
+BLOCKED_MESSAGE = (
+    "Cloudflare refused to pass {url} through to Upwork and returned its "
+    '"You have been blocked" page. The request never reached Upwork, so this is bot '
+    "scoring rejecting this automated browser session, not a login or page problem. "
+    "Do not retry immediately: each attempt extends the block. Wait several minutes, "
+    "then run once. If Upwork loads normally in your own Chrome on this machine, the "
+    "network is fine and only the automation session is being penalised."
+)
+
+
+class UpworkBlockedError(RuntimeError):
+    """Raised when Cloudflare refuses to serve Upwork to the automated browser."""
+
+
+def _blocked_page(driver) -> bool:
+    """Report whether Upwork served Cloudflare's hard block page.
+
+    Unlike an interstitial challenge, this page cannot clear itself: the request
+    never reached Upwork, so no widget, cookie, or reload will recover it.
+    """
+
+    try:
+        return bool(driver.execute_script(BLOCKED_PAGE_JS))
+    except InvalidSessionIdException:
+        raise
+    except WebDriverException:
+        # A navigation can destroy the execution context mid-check.
+        return False
+
+
+def ensure_not_blocked(driver) -> None:
+    """Fail fast with an actionable message instead of scraping a block page."""
+
+    if _blocked_page(driver):
+        try:
+            url = driver.current_url
+        except WebDriverException:
+            url = BEST_MATCHES_URL
+        raise UpworkBlockedError(BLOCKED_MESSAGE.format(url=url))
+
+
 def _visible_button(driver, button_ids=()):
     for button_id in button_ids:
         button = _visible_element_by_id(driver, button_id)
@@ -139,6 +191,7 @@ def _wait_for_login_field(driver, timeout: int, logger):
     deadline = time.monotonic() + timeout
     challenge_reported = False
     while time.monotonic() < deadline:
+        ensure_not_blocked(driver)
         if _authenticated(driver):
             return True
         if _cloudflare_challenge(driver):
@@ -214,6 +267,10 @@ def _click_submit(driver, field, button_ids, timeout: int, logger) -> None:
 
 def _authenticated(driver) -> bool:
     try:
+        if _blocked_page(driver):
+            # The block page is not a login page, but treating it as an
+            # authenticated session makes the scraper silently scrape it.
+            return False
         parsed_url = urlsplit(driver.current_url)
         hostname = parsed_url.hostname or ""
         if hostname != "upwork.com" and not hostname.endswith(".upwork.com"):
@@ -228,13 +285,18 @@ def _authenticated(driver) -> bool:
 
 
 def _at_best_matches(driver) -> bool:
-    parsed_url = urlsplit(driver.current_url)
-    return parsed_url.path.rstrip("/") == "/nx/find-work/best-matches"
+    # Upwork redirects the public path to its session-scoped counterpart
+    # (/nx/s/...), so both forms mean "already on Best Matches".
+    path = urlsplit(driver.current_url).path.rstrip("/")
+    return path in ("/nx/find-work/best-matches", "/nx/s/find-work/best-matches")
 
 
 def _go_to_best_matches(driver) -> None:
     if not _at_best_matches(driver):
         driver.get(BEST_MATCHES_URL)
+    # A 403 block page is served at the requested URL, so the address alone
+    # cannot tell a loaded feed from a refusal.
+    ensure_not_blocked(driver)
 
 
 def _visible_element_by_id(driver, element_id: str):
@@ -270,8 +332,20 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
         _go_to_best_matches(driver)
         return
 
-    driver.get(LOGIN_URL)
-    login_step = _wait_for_login_field(driver, settings.verification_timeout, logger)
+    # Open the target page directly. A persistent profile is normally still
+    # signed in, and routing through the login page makes the browser follow a
+    # redirect and then start a second top-level navigation within a second,
+    # which Cloudflare scores as automation. An expired session simply
+    # redirects here to the login form, where the flow below continues.
+    driver.get(BEST_MATCHES_URL)
+    ensure_not_blocked(driver)
+    try:
+        login_step = _wait_for_login_field(driver, settings.verification_timeout, logger)
+    except TimeoutException:
+        # Neither the feed nor a login form came back; retry on the login page.
+        driver.get(LOGIN_URL)
+        login_step = _wait_for_login_field(driver, settings.verification_timeout, logger)
+
     if login_step is True:
         _go_to_best_matches(driver)
         return
@@ -328,6 +402,7 @@ def login(driver, settings: Settings, logger: Callable[[str], None]) -> None:
     reported_warning: str | None = None
     challenge_reported = False
     while time.monotonic() < deadline:
+        ensure_not_blocked(driver)
         if _authenticated(driver):
             _go_to_best_matches(driver)
             return
