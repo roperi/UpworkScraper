@@ -81,6 +81,9 @@ def _launch_with_driver(settings: Settings, spec: BrowserSpec, driver_path: Path
     options.headless = False
     options.page_load_strategy = "eager"
     options.add_argument("--disable-dev-shm-usage")
+    # Lets the app report the HTTP outcome of each Upwork document load
+    # (status, cf-ray, cf-mitigated) so block pages can be diagnosed.
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     options.user_data_dir = str(settings.browser_profile_dir)
     if settings.proxy_server:
         options.add_argument(f"--proxy-server={settings.proxy_server}")

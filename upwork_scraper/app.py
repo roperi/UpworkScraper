@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import random
 import re
 import sys
 import time
@@ -11,11 +13,12 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from .auth import login
+from .auth import UpworkBlockedError, ensure_not_blocked, login
 from .browser import discover_browser, launch_driver
 from .config import ConfigurationError, load_settings, validate_proxy_server
 from .database import connect_to_db, create_db
@@ -23,8 +26,11 @@ from .job_helpers import parse_job_details
 
 SCROLL_STEPS = 12
 SCROLL_PAUSE_SECONDS = 0.5
+FEED_READY_TIMEOUT = 45
 JOB_COUNT_STABLE_POLLS = 3
 JOB_COUNT_STABLE_TIMEOUT = 30
+DOCUMENT_HEADERS = ("cf-ray", "cf-mitigated", "server", "retry-after", "location")
+DOCUMENT_LOG_LIMIT = 4
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,69 @@ def _logger(level: str) -> logging.Logger:
     return logger
 
 
+def _enable_response_logging(driver) -> None:
+    """Start collecting document responses from Chrome's performance log.
+
+    The launch options already request performance logging; enabling the
+    network domain makes sure every document response is reported even when a
+    navigation is short-circuited by a redirect or a refusal.
+    """
+
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+    except WebDriverException:
+        pass
+
+
+def _document_responses(driver) -> list[dict]:
+    """Return the document responses recorded since the last call."""
+
+    try:
+        entries = driver.get_log("performance")
+    except WebDriverException:
+        return []
+
+    documents = []
+    for entry in entries:
+        try:
+            message = json.loads(entry["message"])["message"]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if message.get("method") != "Network.responseReceived":
+            continue
+        params = message.get("params") or {}
+        if params.get("type") != "Document":
+            continue
+        response = params.get("response") or {}
+        headers = {key.lower(): value for key, value in (response.get("headers") or {}).items()}
+        document = {
+            "url": response.get("url", ""),
+            "status": response.get("status"),
+        }
+        for header in DOCUMENT_HEADERS:
+            document[header] = headers.get(header)
+        documents.append(document)
+    return documents
+
+
+def _log_document_responses(driver, logger: logging.Logger) -> None:
+    """Log the HTTP outcome of each Upwork document load.
+
+    Cloudflare reports its verdict in the response, so these lines say whether
+    a run was refused, challenged, or served, without guessing from page text.
+    """
+
+    if driver is None:
+        return
+    for document in _document_responses(driver)[-DOCUMENT_LOG_LIMIT:]:
+        details = ", ".join(
+            f"{header}={document.get(header) or '-'}"
+            for header in DOCUMENT_HEADERS
+            if header in {"cf-ray", "cf-mitigated", "retry-after"}
+        )
+        logger.info("Response %s for %s (%s)", document["status"], document["url"], details)
+
+
 def _arguments(argv: list[str] | None):
     parser = ArgumentParser(description="Scrape Upwork Best Matches once")
     parser.add_argument("--check-config", action="store_true", help="validate settings and browser")
@@ -73,34 +142,70 @@ def _arguments(argv: list[str] | None):
     return parser.parse_args(argv)
 
 
+_JOB_TILES_JS = """
+const tiles = Array.from(document.querySelectorAll('[data-test="job-tile"], .job-tile'));
+return {
+  tiles: tiles.map(tile => {
+    const link = tile.querySelector('a[href*="/jobs/"]');
+    const tracker = tile.querySelector('[data-ev-opening_uid]');
+    const title = tile.querySelector('[data-test="job-title"]');
+    return {
+      href: link ? link.getAttribute('href') : null,
+      uid: tracker ? tracker.getAttribute('data-ev-opening_uid') : null,
+      title: title ? title.textContent.trim() : null,
+    };
+  }),
+  // Fallback for variants whose tiles carry no data-test/class hooks: the job
+  // links themselves are the canonical URLs and are always rendered.
+  links: Array.from(document.querySelectorAll('a[href*="/jobs/"]'))
+    .map(anchor => anchor.getAttribute('href'))
+    .filter(href => href && /_~02\\d+/.test(href)),
+};
+"""
+
+
 def _job_urls(driver) -> list[str]:
-    """Build canonical job URLs from the feed tiles.
+    """Collect canonical job URLs from the feed, in document order."""
 
-    Upwork no longer links job titles to ``/jobs/`` pages. Each tile still
-    carries the opening UID, and the job cipher is ``~02`` followed by it.
-    """
+    found = driver.execute_script(_JOB_TILES_JS) or {}
+    urls = [
+        url for url in (_tile_job_url(tile) for tile in found.get("tiles", [])) if url is not None
+    ]
+    if urls:
+        return urls
 
-    tiles = driver.execute_script(
-        """
-        return Array.from(document.querySelectorAll('[data-test="job-tile"]')).map(tile => {
-            const tracker = tile.querySelector('[data-ev-opening_uid]');
-            const title = tile.querySelector('[data-test="job-title"]');
-            if (!tracker || !title) return null;
-            return {
-                uid: tracker.getAttribute('data-ev-opening_uid'),
-                title: title.textContent.trim(),
-            };
-        }).filter(Boolean);
-        """
-    )
-    urls = []
-    for tile in tiles:
-        uid = tile.get("uid")
-        if not uid:
-            continue
-        slug = re.sub(r"[^A-Za-z0-9]+", "-", tile.get("title") or "").strip("-")
-        urls.append(f"https://www.upwork.com/jobs/{slug}_~02{uid}")
-    return urls
+    fallback: list[str] = []
+    for href in found.get("links", []):
+        url = _absolute_job_url(href)
+        if url is not None and url not in fallback:
+            fallback.append(url)
+    return fallback
+
+
+def _absolute_job_url(href: str) -> str | None:
+    """Normalize a rendered job link to a canonical absolute URL."""
+
+    href = (href or "").strip()
+    if href.startswith("/jobs/"):
+        return f"https://www.upwork.com{href.split('?', 1)[0].split('#', 1)[0]}"
+    if href.startswith("https://www.upwork.com/jobs/"):
+        return href.split("?", 1)[0].split("#", 1)[0]
+    return None
+
+
+def _tile_job_url(tile: dict) -> str | None:
+    """Return the canonical job URL for one feed tile, or ``None``."""
+
+    url = _absolute_job_url(tile.get("href") or "")
+    if url is not None:
+        return url
+
+    uid = tile.get("uid")
+    title = tile.get("title")
+    if not uid or not title:
+        return None
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-")
+    return f"https://www.upwork.com/jobs/{slug}_~02{uid}"
 
 
 def _feed_container(driver):
@@ -143,23 +248,69 @@ def _scroll_offset(driver, container) -> int:
     return driver.execute_script("return Math.round(arguments[0].scrollTop);", container)
 
 
+def _job_tile_count(driver) -> int:
+    """Count rendered feed entries without parsing their contents."""
+
+    count = driver.execute_script(
+        """
+        const tiles = document.querySelectorAll('[data-test="job-tile"], .job-tile').length;
+        if (tiles) return tiles;
+        return Array.from(document.querySelectorAll('a[href*="/jobs/"]'))
+          .filter(anchor => /_~02\\d+/.test(anchor.getAttribute('href') || '')).length;
+        """
+    )
+    return count if isinstance(count, int) else 0
+
+
+def _wait_for_feed(driver, logger: logging.Logger) -> None:
+    """Wait for the feed to render before sending any input.
+
+    Sending wheel events into the blank shell that loads first is both useless
+    (there is nothing to scroll) and a strong automation signal, so wait for
+    the first tile instead of scrolling on a timer.
+    """
+
+    deadline = time.monotonic() + FEED_READY_TIMEOUT
+    while time.monotonic() < deadline:
+        ensure_not_blocked(driver)
+        if _job_tile_count(driver):
+            return
+        time.sleep(0.5)
+    logger.warning("No job tiles rendered after %d seconds; scrolling anyway", FEED_READY_TIMEOUT)
+
+
 def _load_job_list(driver, logger: logging.Logger) -> None:
     """Scroll through results and wait briefly for lazy-loaded jobs to settle."""
 
+    _wait_for_feed(driver, logger)
+
+    previous_offset = -1
+    stalled = 0
     for step in range(1, SCROLL_STEPS + 1):
+        # Cloudflare can swap in its block page after an initial success, so
+        # check every step instead of scrolling twenty seconds of nothing.
+        ensure_not_blocked(driver)
         # The feed renders asynchronously, so the scroll container may not
         # exist yet on the first steps. Rediscover it every step instead of
         # caching a None/decoy and silently no-op'ing the rest of the run.
         container = _feed_container(driver)
         _scroll_feed(driver, container)
-        time.sleep(SCROLL_PAUSE_SECONDS)
+        time.sleep(random.uniform(SCROLL_PAUSE_SECONDS, SCROLL_PAUSE_SECONDS * 2))
+        offset = _scroll_offset(driver, container)
         logger.info(
             "Loading jobs: scroll %d/%d; %d job links visible; offset %d",
             step,
             SCROLL_STEPS,
             len(_job_urls(driver)),
-            _scroll_offset(driver, container),
+            offset,
         )
+        # A wheel event on an already-scrolled-to-bottom feed is pure synthetic
+        # input, so stop once two consecutive steps move nothing.
+        stalled = stalled + 1 if offset == previous_offset else 0
+        previous_offset = offset
+        if stalled >= 2:
+            logger.info("Feed reached the bottom after %d scrolls", step)
+            break
 
     container = _feed_container(driver)
     if container is not None:
@@ -285,11 +436,18 @@ def main(argv: list[str] | None = None) -> bool:
         try:
             driver, browser = launch_driver(settings)
             logger.info("Using %s (%s)", browser.executable, browser.version)
+            _enable_response_logging(driver)
             logger.info("Validating Upwork login")
             login(driver, settings, lambda message: logger.warning(message))
+            _log_document_responses(driver, logger)
             logger.info("Upwork login validation succeeded")
             return True
+        except UpworkBlockedError as exc:
+            _log_document_responses(driver, logger)
+            logger.error("%s", exc)
+            return False
         except Exception:
+            _log_document_responses(driver, logger)
             logger.exception("Login validation failed")
             return False
         finally:
@@ -305,9 +463,11 @@ def main(argv: list[str] | None = None) -> bool:
         create_db(conn, cursor)
         driver, browser = launch_driver(settings)
         logger.info("Using %s (%s)", browser.executable, browser.version)
+        _enable_response_logging(driver)
         logger.info("Checking Upwork authentication")
         login(driver, settings, lambda message: logger.warning(message))
         logger.info("Upwork authentication ready")
+        _log_document_responses(driver, logger)
 
         _load_job_list(driver, logger)
 
@@ -320,6 +480,13 @@ def main(argv: list[str] | None = None) -> bool:
         job_posts = text.split("Posted")[1:]
         job_urls = _job_urls(driver)
         logger.info("Parsed %d job posts and found %d job links", len(job_posts), len(job_urls))
+        if not job_urls:
+            # Reporting success here would hide both a block page and a changed
+            # feed markup behind "0 jobs processed".
+            raise RuntimeError(
+                "No job links were found on the Best Matches feed; the page markup may have "
+                "changed, or Upwork served an unexpected page"
+            )
         counts = _process_jobs(job_posts, job_urls, cursor, logger)
         conn.commit()
         logger.info(
@@ -333,7 +500,12 @@ def main(argv: list[str] | None = None) -> bool:
             counts.skipped,
         )
         return True
+    except UpworkBlockedError as exc:
+        _log_document_responses(driver, logger)
+        logger.error("%s", exc)
+        return False
     except Exception:
+        _log_document_responses(driver, logger)
         logger.exception("Scraping failed")
         return False
     finally:

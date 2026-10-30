@@ -1,3 +1,5 @@
+from selenium.common.exceptions import TimeoutException
+
 from upwork_scraper import auth
 from upwork_scraper.auth import (
     BEST_MATCHES_URL,
@@ -41,6 +43,7 @@ class FakeDriver:
         self.challenge = False
         self.tokens = []
         self.body_text = ""
+        self.blocked = False
 
     def get(self, url):
         self.visited_urls.append(url)
@@ -69,6 +72,8 @@ class FakeDriver:
             if isinstance(self.challenge, list):
                 return self.challenge.pop(0)
             return self.challenge
+        if script == auth.BLOCKED_PAGE_JS:
+            return self.blocked
         return None
 
 
@@ -180,7 +185,9 @@ def test_login_navigates_authenticated_profile_to_best_matches(monkeypatch):
     assert driver.visited_urls == [BEST_MATCHES_URL]
 
 
-def test_login_handles_authenticated_redirect_from_login_url(monkeypatch):
+def test_login_opens_best_matches_directly_for_a_signed_in_profile(monkeypatch):
+    """A persistent session must not route through the login page first."""
+
     driver = FakeDriver("about:blank", redirect_url=BEST_MATCHES_URL)
     settings = Settings(username="user@example.com", password="secret", first_name="FirstName")
 
@@ -191,10 +198,73 @@ def test_login_handles_authenticated_redirect_from_login_url(monkeypatch):
 
     auth.login(driver, settings, lambda _message: None)
 
-    assert driver.visited_urls == [LOGIN_URL]
+    assert driver.visited_urls == [BEST_MATCHES_URL]
+
+
+def test_login_falls_back_to_the_login_page_when_the_feed_is_unavailable(monkeypatch):
+    monkeypatch.setattr(auth.time, "sleep", lambda _seconds: None)
+    driver = FakeDriver("about:blank")
+    settings = Settings(
+        username="user@example.com",
+        password="secret",
+        first_name="FirstName",
+        verification_timeout=0,
+    )
+
+    try:
+        auth.login(driver, settings, lambda _message: None)
+    except TimeoutException:
+        pass
+    else:
+        raise AssertionError("expected a timeout without a feed or login form")
+
+    assert driver.visited_urls == [BEST_MATCHES_URL, LOGIN_URL]
 
 
 def test_login_warning_detects_security_interstitials():
     assert _login_warning("We detected abnormal behavior") == "abnormal behavior"
     assert _login_warning("The account has unusual activity") == "unusual activity"
     assert _login_warning("Normal login page") is None
+
+
+def test_at_best_matches_accepts_the_session_scoped_redirect_url():
+    assert auth._at_best_matches(FakeDriver("https://www.upwork.com/nx/find-work/best-matches"))
+    assert auth._at_best_matches(FakeDriver("https://www.upwork.com/nx/s/find-work/best-matches"))
+    assert not auth._at_best_matches(FakeDriver("https://www.upwork.com/nx/find-work/home"))
+
+
+def test_blocked_page_is_not_treated_as_authenticated():
+    driver = FakeDriver(BEST_MATCHES_URL)
+    driver.blocked = True
+
+    assert auth._blocked_page(driver) is True
+    assert _authenticated(driver) is False
+
+
+def test_login_fails_fast_when_cloudflare_blocks_the_login_page():
+    driver = FakeDriver(LOGIN_URL)
+    driver.blocked = True
+    settings = Settings(username="user@example.com", password="secret", first_name="FirstName")
+
+    try:
+        auth.login(driver, settings, lambda _message: None)
+    except auth.UpworkBlockedError as exc:
+        assert "bot scoring" in str(exc)
+    else:
+        raise AssertionError("expected UpworkBlockedError while Cloudflare blocks the network")
+
+
+def test_go_to_best_matches_fails_fast_when_cloudflare_blocks():
+    class BlockingDriver(FakeDriver):
+        def get(self, url):
+            super().get(url)
+            self.blocked = True
+
+    driver = BlockingDriver("https://www.upwork.com/nx/find-work/home")
+
+    try:
+        auth._go_to_best_matches(driver)
+    except auth.UpworkBlockedError:
+        pass
+    else:
+        raise AssertionError("expected UpworkBlockedError from the block page")
