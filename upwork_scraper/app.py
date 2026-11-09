@@ -12,6 +12,7 @@ from argparse import ArgumentParser
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
@@ -137,6 +138,10 @@ def _arguments(argv: list[str] | None):
         action="store_true",
         help="validate live Upwork login without scraping or writing jobs",
     )
+    parser.add_argument(
+        "--from-snapshot",
+        help="load jobs from a saved log/snapshots/*.json file instead of scraping Upwork",
+    )
     parser.add_argument("--verification-timeout", type=int)
     parser.add_argument("--log-level")
     return parser.parse_args(argv)
@@ -167,7 +172,10 @@ return {
 def _job_urls(driver) -> list[str]:
     """Collect canonical job URLs from the feed, in document order."""
 
-    found = driver.execute_script(_JOB_TILES_JS) or {}
+    return _urls_from_found(driver.execute_script(_JOB_TILES_JS) or {})
+
+
+def _urls_from_found(found: dict) -> list[str]:
     urls = [
         url for url in (_tile_job_url(tile) for tile in found.get("tiles", [])) if url is not None
     ]
@@ -186,11 +194,17 @@ def _absolute_job_url(href: str) -> str | None:
     """Normalize a rendered job link to a canonical absolute URL."""
 
     href = (href or "").strip()
-    if href.startswith("/jobs/"):
-        return f"https://www.upwork.com{href.split('?', 1)[0].split('#', 1)[0]}"
-    if href.startswith("https://www.upwork.com/jobs/"):
-        return href.split("?", 1)[0].split("#", 1)[0]
-    return None
+    if not href:
+        return None
+    parsed = urlsplit(href)
+    if parsed.netloc and parsed.hostname not in {"upwork.com", "www.upwork.com"}:
+        return None
+    # Feed markup has used both root-relative URLs and URLs nested under an
+    # /nx/... route. Keep the canonical job path and discard tracking data.
+    match = re.search(r"(?:^|/)jobs/(.+)$", parsed.path)
+    if not match:
+        return None
+    return f"https://www.upwork.com/jobs/{match.group(1)}"
 
 
 def _tile_job_url(tile: dict) -> str | None:
@@ -335,6 +349,46 @@ def _load_job_list(driver, logger: logging.Logger) -> None:
     logger.info("Job list loaded: %d job links visible", previous_count)
 
 
+def _save_snapshot(driver, logger: logging.Logger, reason: str) -> dict:
+    """Capture the loaded feed once and persist it to disk before parsing.
+
+    Everything later parsing needs (tiles, links, text) comes from this single
+    capture, so a page that changes or a parser that fails cannot cost a run's
+    worth of scrolling. The raw HTML is kept for offline troubleshooting.
+    """
+
+    found = driver.execute_script(_JOB_TILES_JS) or {}
+    try:
+        found["text"] = driver.execute_script(
+            "const m = Array.from(document.querySelectorAll('main > div')).pop();"
+            "return m ? m.innerText : document.body.innerText;"
+        )
+        found["url"] = driver.current_url
+        html = driver.page_source
+    except WebDriverException as exc:
+        logger.warning("Could not capture full page for snapshot: %s", exc)
+        html = ""
+    try:
+        directory = Path(__file__).resolve().parents[1] / "log" / "snapshots"
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        (directory / f"best-matches-{stamp}.json").write_text(
+            json.dumps({"reason": reason, **found}, indent=2, default=str)
+        )
+        (directory / f"best-matches-{stamp}.html").write_text(html)
+        logger.info("Saved feed snapshot to %s/best-matches-%s.*", directory, stamp)
+    except OSError as exc:
+        logger.warning("Could not write feed snapshot: %s", exc)
+    return found
+
+
+def _posts_and_urls(snapshot: dict, first_name: str | None) -> tuple[list[str], list[str]]:
+    text = snapshot.get("text") or ""
+    if first_name:
+        text = text.split(first_name)[0]
+    return text.split("Posted")[1:], _urls_from_found(snapshot)
+
+
 def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> ScrapeCounts:
     """Parse and persist posts, retaining progress when one post fails."""
 
@@ -457,6 +511,32 @@ def main(argv: list[str] | None = None) -> bool:
                 except Exception:
                     logger.warning("Browser was already closed")
 
+    if args.from_snapshot:
+        conn, cursor = connect_to_db(settings.database_path)
+        try:
+            create_db(conn, cursor)
+            snapshot = json.loads(Path(args.from_snapshot).read_text())
+            job_posts, job_urls = _posts_and_urls(snapshot, settings.first_name)
+            logger.info(
+                "Loaded %d job posts and %d job links from snapshot", len(job_posts), len(job_urls)
+            )
+            counts = _process_jobs(job_posts, job_urls, cursor, logger)
+            conn.commit()
+            logger.info(
+                "Snapshot import completed: %d inserted, %d updated, %d unchanged, %d failed",
+                counts.inserted,
+                counts.updated,
+                counts.unchanged,
+                counts.failed,
+            )
+            return True
+        except (OSError, ValueError):
+            logger.exception("Snapshot import failed")
+            return False
+        finally:
+            cursor.close()
+            conn.close()
+
     conn, cursor = connect_to_db(settings.database_path)
     driver = None
     try:
@@ -471,14 +551,8 @@ def main(argv: list[str] | None = None) -> bool:
 
         _load_job_list(driver, logger)
 
-        jobs_container = WebDriverWait(driver, 30).until(
-            EC.presence_of_all_elements_located((By.XPATH, "//main/div"))
-        )[-1]
-        text = jobs_container.text
-        if settings.first_name:
-            text = text.split(settings.first_name)[0]
-        job_posts = text.split("Posted")[1:]
-        job_urls = _job_urls(driver)
+        snapshot = _save_snapshot(driver, logger, "after job list load")
+        job_posts, job_urls = _posts_and_urls(snapshot, settings.first_name)
         logger.info("Parsed %d job posts and found %d job links", len(job_posts), len(job_urls))
         if not job_urls:
             # Reporting success here would hide both a block page and a changed
