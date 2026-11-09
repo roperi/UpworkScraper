@@ -32,6 +32,7 @@ JOB_COUNT_STABLE_POLLS = 3
 JOB_COUNT_STABLE_TIMEOUT = 30
 DOCUMENT_HEADERS = ("cf-ray", "cf-mitigated", "server", "retry-after", "location")
 DOCUMENT_LOG_LIMIT = 4
+SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "log" / "snapshots"
 
 
 @dataclass(frozen=True)
@@ -369,7 +370,7 @@ def _save_snapshot(driver, logger: logging.Logger, reason: str) -> dict:
         logger.warning("Could not capture full page for snapshot: %s", exc)
         html = ""
     try:
-        directory = Path(__file__).resolve().parents[1] / "log" / "snapshots"
+        directory = SNAPSHOT_DIR
         directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         (directory / f"best-matches-{stamp}.json").write_text(

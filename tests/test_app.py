@@ -376,3 +376,119 @@ def test_process_jobs_counts_insert_update_failure_and_skipped(monkeypatch):
         == "2020-01-02"
     )
     assert any(level == "warning" for level, _ in logger.messages)
+
+
+class SnapshotDriver:
+    current_url = "https://www.upwork.com/nx/find-work/best-matches"
+    page_source = "<html>feed</html>"
+
+    def execute_script(self, script):
+        if "innerText" in script:
+            return "Posted 1 hour ago\nJob A\nPosted 2 hours ago\nJob B\nFirstName\nFooter"
+        return {
+            "tiles": [{"href": "/jobs/Job-A_~021/", "uid": None, "title": None}],
+            "links": [],
+        }
+
+
+def test_save_snapshot_writes_json_and_html_before_parsing(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "SNAPSHOT_DIR", tmp_path / "snapshots")
+
+    found = app._save_snapshot(SnapshotDriver(), FakeLogger(), "test")
+
+    assert found["url"] == SnapshotDriver.current_url
+    saved_json = list((tmp_path / "snapshots").glob("best-matches-*.json"))
+    saved_html = list((tmp_path / "snapshots").glob("best-matches-*.html"))
+    assert len(saved_json) == 1 and len(saved_html) == 1
+    saved = json.loads(saved_json[0].read_text())
+    assert saved["reason"] == "test"
+    assert saved["tiles"][0]["href"] == "/jobs/Job-A_~021/"
+    assert saved_html[0].read_text() == "<html>feed</html>"
+
+
+def test_save_snapshot_survives_unwritable_directory(monkeypatch, tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("not a directory")
+    monkeypatch.setattr(app, "SNAPSHOT_DIR", blocker / "snapshots")
+    logger = FakeLogger()
+
+    found = app._save_snapshot(SnapshotDriver(), logger, "test")
+
+    assert found["tiles"]
+    assert any(level == "warning" for level, _ in logger.messages)
+
+
+def test_posts_and_urls_split_text_and_trim_after_first_name():
+    snapshot = {
+        "text": "Posted 1 hour ago\nJob A\nPosted 2 hours ago\nJob B\nFirstName\nFooter Posted x",
+        "tiles": [{"href": "/jobs/Job-A_~021/", "uid": None, "title": None}],
+        "links": [],
+    }
+
+    posts, urls = app._posts_and_urls(snapshot, "FirstName")
+
+    assert posts == [" 1 hour ago\nJob A\n", " 2 hours ago\nJob B\n"]
+    assert urls == ["https://www.upwork.com/jobs/Job-A_~021/"]
+
+
+def test_posts_and_urls_handle_empty_snapshot():
+    assert app._posts_and_urls({}, "FirstName") == ([], [])
+
+
+def _snapshot_settings(tmp_path):
+    return Settings(
+        username="u@example.com",
+        password="secret",
+        first_name="FirstName",
+        database_path=tmp_path / "jobs.db",
+    )
+
+
+def test_from_snapshot_imports_jobs_without_launching_browser(monkeypatch, tmp_path):
+    snapshot = tmp_path / "snap.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "text": "Posted 1 hour ago\nJob A\n",
+                "tiles": [{"href": "/jobs/Job-A_~021/", "uid": None, "title": None}],
+                "links": [],
+            }
+        )
+    )
+    monkeypatch.setattr(app, "load_settings", lambda: _snapshot_settings(tmp_path))
+    monkeypatch.setattr(app, "_logger", lambda level: FakeLogger())
+    monkeypatch.setattr(
+        app,
+        "launch_driver",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not launch a browser")),
+    )
+    monkeypatch.setattr(
+        app,
+        "parse_job_details",
+        lambda _rows, job_url: {
+            "job_id": "job-a",
+            "job_url": job_url,
+            "job_title": "Job A",
+            "posted_date": None,
+            "job_description": "d",
+            "job_tags": "[]",
+            "job_proposals": "p",
+        },
+    )
+
+    assert app.main(["--from-snapshot", str(snapshot)]) is True
+
+    conn = sqlite3.connect(tmp_path / "jobs.db")
+    rows = conn.execute("SELECT job_id, job_url FROM jobs").fetchall()
+    conn.close()
+    assert rows == [("job-a", "https://www.upwork.com/jobs/Job-A_~021/")]
+
+
+def test_from_snapshot_reports_failure_for_missing_or_invalid_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "load_settings", lambda: _snapshot_settings(tmp_path))
+    monkeypatch.setattr(app, "_logger", lambda level: FakeLogger())
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+
+    assert app.main(["--from-snapshot", str(tmp_path / "missing.json")]) is False
+    assert app.main(["--from-snapshot", str(bad)]) is False
