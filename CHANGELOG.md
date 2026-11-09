@@ -9,6 +9,8 @@ import paths changed.
 
 ### Added
 
+- Feed snapshots saved to `log/snapshots/` before parsing, and `--from-snapshot` to import one
+  into the database without scraping.
 - Real-time scrape progress and inserted/updated/failed/skipped job summaries.
 - Scrape summaries now distinguish changed jobs from unchanged existing jobs.
 - Manual login support for Google-, Apple-, and two-step verification flows when
