@@ -4,6 +4,8 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from upwork_scraper import app
 from upwork_scraper import auth as app_auth
 from upwork_scraper.browser import BrowserSpec
@@ -492,3 +494,217 @@ def test_from_snapshot_reports_failure_for_missing_or_invalid_file(monkeypatch, 
 
     assert app.main(["--from-snapshot", str(tmp_path / "missing.json")]) is False
     assert app.main(["--from-snapshot", str(bad)]) is False
+
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+def _fixture_snapshot(tmp_path, name, ids):
+    """Build a snapshot file from an invented fixture, one job link per post."""
+
+    text = (FIXTURE_DIR / name).read_text()
+    path = tmp_path / f"{name}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "text": text,
+                "tiles": [{"href": f"/jobs/Example-Job_~{i}/", "uid": None} for i in ids],
+                "links": [],
+            }
+        )
+    )
+    return path
+
+
+NEWER_IDS = ["02a1", "02a2", "02a3", "02a4", "02a5"]
+
+
+def _jobs_db(path):
+    conn = sqlite3.connect(path)
+    cursor = conn.cursor()
+    create_db(conn, cursor)
+    return conn, cursor
+
+
+def _insert(cursor, job_id, tags, proposals):
+    cursor.execute(
+        "INSERT INTO jobs (job_id, job_url, job_title, job_description, job_tags, "
+        "job_proposals, updated_at) VALUES (?, 'u', 'Kept title', 'Kept description', ?, ?, "
+        "'2020-01-01')",
+        (job_id, tags, proposals),
+    )
+
+
+def test_process_jobs_reports_posts_without_skills_or_proposals():
+    conn, cursor = _jobs_db(":memory:")
+    logger = FakeLogger()
+    text = (FIXTURE_DIR / "best_matches_newer_layout.txt").read_text()
+    posts = text.split("Posted")[1:]
+    counts = app._process_jobs(posts, [f"/jobs/J_~{i}/" for i in NEWER_IDS], cursor, logger)
+    assert counts.inserted == 5
+    assert counts.without_skills == 1
+    assert counts.without_proposals == 0
+    assert not any(level == "warning" for level, _ in logger.messages)
+
+
+def test_process_jobs_warns_when_most_posts_lack_skills_or_proposals():
+    conn, cursor = _jobs_db(":memory:")
+    logger = FakeLogger()
+    posts = [f" 1 hour ago\nTitle {i}\n" for i in range(4)]
+    counts = app._process_jobs(posts, [f"/jobs/J_~0{i}/" for i in range(4)], cursor, logger)
+    assert counts.without_skills == 4
+    assert counts.without_proposals == 4
+    warnings = [str(args) for level, args in logger.messages if level == "warning"]
+    assert any("skills" in text for text in warnings)
+    assert any("proposal" in text for text in warnings)
+
+
+def test_repair_fills_only_empty_values_and_never_overwrites(tmp_path):
+    conn, cursor = _jobs_db(tmp_path / "jobs.db")
+    _insert(cursor, "02a1", "[]", "Proposals:")  # both empty -> filled
+    _insert(cursor, "02a2", '["Kept"]', "")  # tags kept, proposals filled
+    _insert(cursor, "02a3", "[]", "99 to 100")  # tags filled, proposals kept
+    _insert(cursor, "02a4", None, None)  # NULLs are empty too
+    _insert(cursor, "unrelated", "[]", "")  # not in snapshot -> untouched
+    conn.commit()
+    text = (FIXTURE_DIR / "best_matches_newer_layout.txt").read_text()
+    posts = text.split("Posted")[1:]
+    urls = [f"https://www.upwork.com/jobs/J_~{i}/" for i in NEWER_IDS]
+    logger = FakeLogger()
+
+    result = app._repair_from_snapshot(posts, urls, cursor, logger)
+    conn.commit()
+
+    rows = {
+        row[0]: row[1:]
+        for row in cursor.execute(
+            "SELECT job_id, job_tags, job_proposals, job_title, job_description, updated_at "
+            "FROM jobs"
+        )
+    }
+    assert json.loads(rows["02a1"][0]) == ["Python", "Dashboards", "Data Entry", "Reporting"]
+    assert rows["02a1"][1] == "15 to 20"
+    assert rows["02a2"][0] == '["Kept"]'
+    assert rows["02a2"][1] == "50+"
+    assert json.loads(rows["02a3"][0]) == ["Copywriting"]
+    assert rows["02a3"][1] == "99 to 100"
+    assert json.loads(rows["02a4"][0]) == ["HTML", "CSS"]
+    assert rows["02a4"][1] == "Fewer than 5"
+    assert rows["unrelated"] == ("[]", "", "Kept title", "Kept description", "2020-01-01")
+    assert rows["02a1"][2:4] == ("Kept title", "Kept description")
+    assert result.repaired == 4
+    assert result.missing == 1  # 02a5 is not stored; repair never inserts
+    assert cursor.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 5
+
+
+def test_repair_is_idempotent(tmp_path):
+    conn, cursor = _jobs_db(tmp_path / "jobs.db")
+    _insert(cursor, "02a1", "[]", "Proposals:")
+    conn.commit()
+    posts = (FIXTURE_DIR / "best_matches_newer_layout.txt").read_text().split("Posted")[1:]
+    urls = [f"https://www.upwork.com/jobs/J_~{i}/" for i in NEWER_IDS]
+    assert app._repair_from_snapshot(posts, urls, cursor, FakeLogger()).repaired == 1
+    assert app._repair_from_snapshot(posts, urls, cursor, FakeLogger()).repaired == 0
+
+
+def test_repair_cli_reads_snapshots_and_commits(monkeypatch, tmp_path):
+    conn, cursor = _jobs_db(tmp_path / "jobs.db")
+    _insert(cursor, "02a1", "[]", "Proposals:")
+    conn.commit()
+    conn.close()
+    snapshot = _fixture_snapshot(tmp_path, "best_matches_newer_layout.txt", NEWER_IDS)
+    monkeypatch.setattr(app, "load_settings", lambda: _snapshot_settings(tmp_path))
+    monkeypatch.setattr(app, "_logger", lambda level: FakeLogger())
+    monkeypatch.setattr(
+        app,
+        "launch_driver",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not launch a browser")),
+    )
+
+    assert app.main(["--repair-from-snapshot", str(snapshot)]) is True
+
+    conn = sqlite3.connect(tmp_path / "jobs.db")
+    row = conn.execute("SELECT job_tags, job_proposals FROM jobs").fetchone()
+    conn.close()
+    assert json.loads(row[0])[0] == "Python"
+    assert row[1] == "15 to 20"
+
+
+def test_repair_cli_fails_for_missing_snapshot_or_database(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "load_settings", lambda: _snapshot_settings(tmp_path))
+    monkeypatch.setattr(app, "_logger", lambda level: FakeLogger())
+    assert app.main(["--repair-from-snapshot", str(tmp_path / "missing.json")]) is False
+    # A missing database is reported, not silently created.
+    snapshot = _fixture_snapshot(tmp_path, "best_matches_newer_layout.txt", NEWER_IDS)
+    assert app.main(["--repair-from-snapshot", str(snapshot)]) is False
+    assert not (tmp_path / "jobs.db").exists()
+
+
+def test_repair_leaves_updated_at_unchanged_on_repaired_rows(tmp_path):
+    conn, cursor = _jobs_db(tmp_path / "jobs.db")
+    _insert(cursor, "02a1", "[]", "Proposals:")
+    conn.commit()
+    before = cursor.execute("SELECT updated_at FROM jobs WHERE job_id = '02a1'").fetchone()[0]
+    posts = (FIXTURE_DIR / "best_matches_newer_layout.txt").read_text().split("Posted")[1:]
+    urls = [f"https://www.upwork.com/jobs/J_~{i}/" for i in NEWER_IDS]
+
+    assert app._repair_from_snapshot(posts, urls, cursor, FakeLogger()).repaired == 1
+    conn.commit()
+
+    row = cursor.execute(
+        "SELECT job_proposals, updated_at FROM jobs WHERE job_id = '02a1'"
+    ).fetchone()
+    assert row[0] == "15 to 20"
+    assert row[1] == before == "2020-01-01"
+
+
+def _process_with_bucket(monkeypatch, stored, scraped):
+    conn, cursor = _jobs_db(":memory:")
+    _insert(cursor, "02b1", "[]", stored)
+    monkeypatch.setattr(
+        app,
+        "parse_job_details",
+        lambda _rows, job_url: {
+            "job_id": "02b1",
+            "job_url": job_url,
+            "job_title": "Title",
+            "posted_date": None,
+            "job_description": "Description",
+            "job_tags": '["Skill"]',
+            "job_proposals": scraped,
+        },
+    )
+    counts = app._process_jobs(["post"], ["/jobs/J_~02b1/"], cursor, FakeLogger())
+    row = cursor.execute("SELECT job_proposals, updated_at FROM jobs").fetchone()
+    return counts, row
+
+
+def test_process_jobs_never_replaces_stored_bucket_with_empty_value(monkeypatch):
+    counts, row = _process_with_bucket(monkeypatch, "5 to 10", "")
+    assert row == ("5 to 10", "2020-01-01")
+    assert (counts.updated, counts.unchanged) == (0, 1)
+
+
+@pytest.mark.parametrize("stored", ["", "Proposals:"])
+def test_process_jobs_replaces_empty_stored_bucket_with_real_bucket(monkeypatch, stored):
+    counts, row = _process_with_bucket(monkeypatch, stored, "10 to 15")
+    assert row[0] == "10 to 15"
+    assert row[1] != "2020-01-01"
+    assert counts.updated == 1
+
+
+def test_process_jobs_replaces_real_bucket_with_different_real_bucket(monkeypatch):
+    counts, row = _process_with_bucket(monkeypatch, "5 to 10", "10 to 15")
+    assert row[0] == "10 to 15"
+    assert counts.updated == 1
+
+
+def test_parse_quality_messages_read_naturally():
+    logger = FakeLogger()
+    app._log_parse_quality(
+        app.ScrapeCounts(inserted=4, without_skills=4, without_proposals=4), logger
+    )
+    texts = [args[0] % args[1:] for _, args in logger.messages]
+    assert any("have no skills" in text for text in texts)
+    assert any("have no proposal bucket" in text for text in texts)
+    assert not any("no a " in text for text in texts)
