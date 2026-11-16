@@ -167,7 +167,8 @@ def _arguments(argv: list[str] | None):
         metavar="SNAPSHOT",
         help=(
             "fill empty job_tags and job_proposals of stored jobs from saved "
-            "log/snapshots/*.json files; never overwrites a non-empty value or adds jobs"
+            "log/snapshots/*.json files; never overwrites a non-empty value or adds jobs. "
+            "Pass snapshots oldest first (the first non-empty value found for a job is kept)"
         ),
     )
     parser.add_argument("--verification-timeout", type=int)
@@ -482,12 +483,11 @@ def _repair_from_snapshot(
                     new_proposals = details["job_proposals"]
                 if (new_tags, new_proposals) != (stored_tags, stored_proposals):
                     cursor.execute(
-                        "UPDATE jobs SET job_tags = ?, job_proposals = ?, updated_at = ? "
+                        "UPDATE jobs SET job_tags = ?, job_proposals = ? "
                         "WHERE job_id = ? AND job_tags IS ? AND job_proposals IS ?",
                         (
                             new_tags,
                             new_proposals,
-                            datetime.now(),
                             details["job_id"],
                             stored_tags,
                             stored_proposals,

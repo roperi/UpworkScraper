@@ -636,3 +636,21 @@ def test_repair_cli_fails_for_missing_snapshot_or_database(monkeypatch, tmp_path
     snapshot = _fixture_snapshot(tmp_path, "best_matches_newer_layout.txt", NEWER_IDS)
     assert app.main(["--repair-from-snapshot", str(snapshot)]) is False
     assert not (tmp_path / "jobs.db").exists()
+
+
+def test_repair_leaves_updated_at_unchanged_on_repaired_rows(tmp_path):
+    conn, cursor = _jobs_db(tmp_path / "jobs.db")
+    _insert(cursor, "02a1", "[]", "Proposals:")
+    conn.commit()
+    before = cursor.execute("SELECT updated_at FROM jobs WHERE job_id = '02a1'").fetchone()[0]
+    posts = (FIXTURE_DIR / "best_matches_newer_layout.txt").read_text().split("Posted")[1:]
+    urls = [f"https://www.upwork.com/jobs/J_~{i}/" for i in NEWER_IDS]
+
+    assert app._repair_from_snapshot(posts, urls, cursor, FakeLogger()).repaired == 1
+    conn.commit()
+
+    row = cursor.execute(
+        "SELECT job_proposals, updated_at FROM jobs WHERE job_id = '02a1'"
+    ).fetchone()
+    assert row[0] == "15 to 20"
+    assert row[1] == before == "2020-01-01"
