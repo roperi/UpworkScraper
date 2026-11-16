@@ -77,17 +77,64 @@ def clean_job_proposals(job_proposals_text: str | None) -> str:
 
     if not job_proposals_text:
         return ""
-    if "freelancers" in job_proposals_text:
-        proposals = job_proposals_text.replace("Proposals: ", "").split(" Nu")[0]
-    elif " ago" in job_proposals_text:
+    # The label is followed by a space in one layout and by nothing in another.
+    text = _PROPOSALS_LABEL.sub("", job_proposals_text)
+    if "freelancers" in text:
+        proposals = text.split(" Nu")[0]
+    elif " ago" in text:
         proposals = ""
     else:
-        proposals = (
-            job_proposals_text.replace("Proposals: ", "")
-            .replace("Load More Jobs", "")
-            .replace("Featured", "")
-        )
+        proposals = text.replace("Load More Jobs", "").replace("Featured", "")
     return proposals.strip()
+
+
+_PROPOSALS_LABEL = re.compile(r"Proposals:[ \t]*")
+_PROPOSALS_BUCKET = re.compile(
+    r"^(?:\d+\s*to\s*\d+|\d+\+|(?:fewer|less)\s+than\s+\d+)$", re.IGNORECASE
+)
+# Lines that end the skills block in a job tile (client block follows the skills).
+_SKILLS_END_MARKERS = ("Verified", "Payment", "Rating", "$", "United States")
+
+
+def _find_proposals(rows: list[str]) -> tuple[int | None, str]:
+    """Return the proposals line index and its bucket text ("" when none is shown).
+
+    Older tiles put the bucket on the label's line (``Proposals: 5 to 10``);
+    newer ones put it after the label with no space or on the following line.
+    """
+
+    for index, row in enumerate(rows):
+        if "Proposals:" not in row:
+            continue
+        inline = clean_job_proposals(row)
+        if inline:
+            return index, inline
+        for offset in (1, 2):
+            if index + offset >= len(rows):
+                break
+            value = rows[index + offset].strip()
+            if not value:
+                continue
+            if _PROPOSALS_BUCKET.match(value):
+                return index + offset, value
+            break
+        return index, ""
+    return None, ""
+
+
+def _find_skills(rows: list[str], description_index: int) -> list[str]:
+    """Return the raw skill lines of a tile, whichever layout it uses."""
+
+    skills_heading = next((i for i, item in enumerate(rows) if item.strip() == "Skills"), None)
+    # Older layout: skills follow a "Skills" heading. Newer layout has no
+    # heading; the skills are the lines between the description and the
+    # client block.
+    start = skills_heading if skills_heading is not None else description_index
+    for index in range(start + 1, len(rows)):
+        if any(marker in rows[index] for marker in _SKILLS_END_MARKERS):
+            return rows[start + 1 : index]
+    # No client block to bound the skills: refuse to guess.
+    return rows[start + 1 :] if skills_heading is not None else []
 
 
 def clean_skills(skills: list[str]) -> list[str]:
@@ -109,7 +156,7 @@ def clean_skills(skills: list[str]) -> list[str]:
         value = skill.strip()
         if not value or value in exclude_list:
             continue
-        if "Rating is" in value or "$" in value:
+        if "Rating is" in value or "$" in value or value.startswith('about "'):
             continue
         cleaned.append(value)
     return cleaned
@@ -133,14 +180,17 @@ def parse_job_details(rows: list[str], job_url: str | None = None) -> dict:
         (item for item in rows if any(keyword in item.lower() for keyword in time_keywords)),
         rows[0],
     )
-    proposals_text = next((item for item in rows if "Proposals:" in item), "")
-    description = max(rows, key=len)
+    proposals_index, proposals = _find_proposals(rows)
+    description_index = max(range(len(rows)), key=lambda index: len(rows[index]))
+    description = rows[description_index]
+    # The bucket line of the newer layout must not be mistaken for the title.
+    title_rows = [item for index, item in enumerate(rows) if index != proposals_index]
 
     title = ""
     url_title_hint = extract_title_from_url(job_url)
     if url_title_hint:
         hint_words = _word_set(url_title_hint)
-        for item in rows:
+        for item in title_rows:
             value = item.strip()
             if not value or len(value) > 150:
                 continue
@@ -152,7 +202,7 @@ def parse_job_details(rows: list[str], job_url: str | None = None) -> dict:
                 break
 
     if not title:
-        title = next((item for item in rows if f"Job feedback {item}" in rows), "")
+        title = next((item for item in title_rows if f"Job feedback {item}" in rows), "")
 
     if not title:
         blacklist = [
@@ -167,7 +217,7 @@ def parse_job_details(rows: list[str], job_url: str | None = None) -> dict:
             "proposals:",
             'about "',
         ]
-        for item in rows:
+        for item in title_rows:
             value = item.strip()
             value_lower = value.lower()
             if (
@@ -181,26 +231,13 @@ def parse_job_details(rows: list[str], job_url: str | None = None) -> dict:
                 title = value
                 break
 
-    job_tags: list[str] = []
-    try:
-        skills_index = next(index for index, item in enumerate(rows) if item.strip() == "Skills")
-        end_index = len(rows)
-        for index in range(skills_index + 1, len(rows)):
-            if any(
-                marker in rows[index]
-                for marker in ["Verified", "Payment", "Rating", "$", "United States"]
-            ):
-                end_index = index
-                break
-        job_tags = rows[skills_index + 1 : end_index]
-    except StopIteration:
-        pass
+    job_tags = _find_skills(rows, description_index)
 
     return {
         "posted_date": calculate_posted_datetime(posted_date_text),
         "job_title": title,
         "job_description": description,
-        "job_proposals": clean_job_proposals(proposals_text),
+        "job_proposals": proposals,
         "job_tags": json.dumps(clean_skills(job_tags)),
         "job_id": generate_job_id(title, job_url, description),
     }

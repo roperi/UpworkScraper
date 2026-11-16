@@ -6,10 +6,11 @@ import json
 import logging
 import random
 import re
+import sqlite3
 import sys
 import time
 from argparse import ArgumentParser
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -22,7 +23,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from .auth import UpworkBlockedError, ensure_not_blocked, login
 from .browser import discover_browser, launch_driver
 from .config import ConfigurationError, load_settings, validate_proxy_server
-from .database import connect_to_db, create_db
+from .database import connect_to_db, create_db, resolve_database_path
 from .job_helpers import parse_job_details
 
 SCROLL_STEPS = 12
@@ -44,10 +45,27 @@ class ScrapeCounts:
     unchanged: int = 0
     failed: int = 0
     skipped: int = 0
+    # Parse-quality figures; informational, so they do not affect equality.
+    without_skills: int = field(default=0, compare=False)
+    without_proposals: int = field(default=0, compare=False)
 
     @property
     def processed(self) -> int:
         return self.inserted + self.updated + self.unchanged + self.failed
+
+    @property
+    def parsed(self) -> int:
+        return self.processed - self.failed
+
+
+@dataclass(frozen=True)
+class RepairCounts:
+    """Outcomes of filling empty skills/proposals on stored rows from snapshots."""
+
+    repaired: int = 0
+    unchanged: int = 0
+    missing: int = 0
+    failed: int = 0
 
 
 def _logger(level: str) -> logging.Logger:
@@ -142,6 +160,15 @@ def _arguments(argv: list[str] | None):
     parser.add_argument(
         "--from-snapshot",
         help="load jobs from a saved log/snapshots/*.json file instead of scraping Upwork",
+    )
+    parser.add_argument(
+        "--repair-from-snapshot",
+        nargs="+",
+        metavar="SNAPSHOT",
+        help=(
+            "fill empty job_tags and job_proposals of stored jobs from saved "
+            "log/snapshots/*.json files; never overwrites a non-empty value or adds jobs"
+        ),
     )
     parser.add_argument("--verification-timeout", type=int)
     parser.add_argument("--log-level")
@@ -390,6 +417,93 @@ def _posts_and_urls(snapshot: dict, first_name: str | None) -> tuple[list[str], 
     return text.split("Posted")[1:], _urls_from_found(snapshot)
 
 
+def _log_parse_quality(counts: ScrapeCounts, logger: logging.Logger) -> None:
+    """Report posts parsed without skills or proposals; warn when most lack them."""
+
+    if not counts.parsed:
+        return
+    for label, missing in (
+        ("skills", counts.without_skills),
+        ("a proposal bucket", counts.without_proposals),
+    ):
+        message = "%d of %d parsed posts have no %s"
+        if missing * 2 > counts.parsed:
+            logger.warning(
+                message + "; the feed layout may have changed, so check the parser",
+                missing,
+                counts.parsed,
+                label,
+            )
+        else:
+            logger.info(message, missing, counts.parsed, label)
+
+
+def _is_empty_tags(value: str | None) -> bool:
+    if value is None or not value.strip():
+        return True
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return False
+    return isinstance(parsed, list) and not parsed
+
+
+def _is_empty_proposals(value: str | None) -> bool:
+    return value is None or value.strip() in {"", "Proposals:"}
+
+
+def _repair_from_snapshot(
+    job_posts: list[str], job_urls: list[str], cursor, logger: logging.Logger
+) -> RepairCounts:
+    """Fill empty skills and proposal buckets of stored jobs from snapshot posts.
+
+    Only ``job_tags`` and ``job_proposals`` are touched, only when the stored
+    value is empty, and only for jobs that already exist.
+    """
+
+    repaired = unchanged = missing = failed = 0
+    for index in range(min(len(job_posts), len(job_urls))):
+        try:
+            details = parse_job_details(job_posts[index].split("\n"), job_url=job_urls[index])
+            cursor.execute(
+                "SELECT job_tags, job_proposals FROM jobs WHERE job_id = ?", (details["job_id"],)
+            )
+            existing = cursor.fetchall()
+            if not existing:
+                missing += 1
+                continue
+            changed = False
+            for stored_tags, stored_proposals in existing:
+                new_tags = stored_tags
+                if _is_empty_tags(stored_tags) and not _is_empty_tags(details["job_tags"]):
+                    new_tags = details["job_tags"]
+                new_proposals = stored_proposals
+                if _is_empty_proposals(stored_proposals) and details["job_proposals"]:
+                    new_proposals = details["job_proposals"]
+                if (new_tags, new_proposals) != (stored_tags, stored_proposals):
+                    cursor.execute(
+                        "UPDATE jobs SET job_tags = ?, job_proposals = ?, updated_at = ? "
+                        "WHERE job_id = ? AND job_tags IS ? AND job_proposals IS ?",
+                        (
+                            new_tags,
+                            new_proposals,
+                            datetime.now(),
+                            details["job_id"],
+                            stored_tags,
+                            stored_proposals,
+                        ),
+                    )
+                    changed = True
+            if changed:
+                repaired += 1
+            else:
+                unchanged += 1
+        except Exception as exc:
+            failed += 1
+            logger.warning("Repair of job %d failed: %s", index + 1, exc)
+    return RepairCounts(repaired, unchanged, missing, failed)
+
+
 def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> ScrapeCounts:
     """Parse and persist posts, retaining progress when one post fails."""
 
@@ -405,12 +519,16 @@ def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> 
     updated = 0
     unchanged = 0
     failed = 0
+    without_skills = 0
+    without_proposals = 0
     skipped = max(0, len(job_posts) - len(job_urls))
     processable = min(len(job_posts), len(job_urls))
     for index in range(processable):
         post = job_posts[index]
         try:
             details = parse_job_details(post.split("\n"), job_url=job_urls[index])
+            without_skills += _is_empty_tags(details["job_tags"])
+            without_proposals += _is_empty_proposals(details["job_proposals"])
             cursor.execute("SELECT job_proposals FROM jobs WHERE job_id = ?", (details["job_id"],))
             existing = cursor.fetchone()
             if existing is not None:
@@ -453,7 +571,63 @@ def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> 
                 unchanged,
                 failed,
             )
-    return ScrapeCounts(inserted, updated, unchanged, failed, skipped)
+    counts = ScrapeCounts(
+        inserted, updated, unchanged, failed, skipped, without_skills, without_proposals
+    )
+    _log_parse_quality(counts, logger)
+    return counts
+
+
+def _repair_main(snapshot_paths: list[str], settings, logger: logging.Logger) -> bool:
+    """Repair stored rows from saved snapshots without a browser or login."""
+
+    try:
+        snapshots = [
+            _posts_and_urls(json.loads(Path(path).read_text()), settings.first_name)
+            for path in snapshot_paths
+        ]
+    except (OSError, ValueError):
+        logger.exception("Could not read snapshot")
+        return False
+    if not resolve_database_path(settings.database_path).is_file():
+        logger.error("Database %s does not exist; nothing to repair", settings.database_path)
+        return False
+
+    conn, cursor = connect_to_db(settings.database_path)
+    try:
+        total = RepairCounts()
+        for path, (job_posts, job_urls) in zip(snapshot_paths, snapshots, strict=True):
+            result = _repair_from_snapshot(job_posts, job_urls, cursor, logger)
+            logger.info(
+                "Repair from %s: %d repaired, %d unchanged, %d not in database, %d failed",
+                path,
+                result.repaired,
+                result.unchanged,
+                result.missing,
+                result.failed,
+            )
+            total = RepairCounts(
+                total.repaired + result.repaired,
+                total.unchanged + result.unchanged,
+                total.missing + result.missing,
+                total.failed + result.failed,
+            )
+        conn.commit()
+        logger.info(
+            "Repair completed: %d rows repaired, %d unchanged, %d not in database, %d failed",
+            total.repaired,
+            total.unchanged,
+            total.missing,
+            total.failed,
+        )
+        return True
+    except (OSError, ValueError, sqlite3.Error):
+        conn.rollback()
+        logger.exception("Snapshot repair failed")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def main(argv: list[str] | None = None) -> bool:
@@ -511,6 +685,9 @@ def main(argv: list[str] | None = None) -> bool:
                     driver.quit()
                 except Exception:
                     logger.warning("Browser was already closed")
+
+    if args.repair_from_snapshot:
+        return _repair_main(args.repair_from_snapshot, settings, logger)
 
     if args.from_snapshot:
         conn, cursor = connect_to_db(settings.database_path)

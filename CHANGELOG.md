@@ -11,6 +11,9 @@ import paths changed.
 
 - Feed snapshots saved to `log/snapshots/` before parsing, and `--from-snapshot` to import one
   into the database without scraping.
+- `--repair-from-snapshot` to fill empty `job_tags` and `job_proposals` of stored jobs from saved
+  snapshots; it never overwrites a non-empty value and never adds jobs.
+- Per-run counts of posts without skills or a proposal bucket, with a warning when most lack them.
 - Real-time scrape progress and inserted/updated/failed/skipped job summaries.
 - Scrape summaries now distinguish changed jobs from unchanged existing jobs.
 - Manual login support for Google-, Apple-, and two-step verification flows when
@@ -22,6 +25,9 @@ import paths changed.
 - Automated tests, type checking, formatting, and pre-commit secret scanning.
 
 ### Changed
+
+- Skills and proposal buckets are now parsed in both Best Matches tile layouts, and the bare
+  `Proposals:` label is no longer stored as a value (#24).
 
 - Authentication now reuses an already-authenticated persistent browser profile.
 - Reorganized database and parsing modules under `upwork_scraper`.
