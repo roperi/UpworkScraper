@@ -425,7 +425,7 @@ def _log_parse_quality(counts: ScrapeCounts, logger: logging.Logger) -> None:
         return
     for label, missing in (
         ("skills", counts.without_skills),
-        ("a proposal bucket", counts.without_proposals),
+        ("proposal bucket", counts.without_proposals),
     ):
         message = "%d of %d parsed posts have no %s"
         if missing * 2 > counts.parsed:
@@ -534,7 +534,9 @@ def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> 
             if existing is not None:
                 stored_proposals = existing[0] or ""
                 scraped_proposals = details["job_proposals"] or ""
-                if stored_proposals == scraped_proposals:
+                # An empty scraped bucket means it could not be read, so it must
+                # never replace a stored value.
+                if stored_proposals == scraped_proposals or not scraped_proposals:
                     unchanged += 1
                     continue
                 cursor.execute(

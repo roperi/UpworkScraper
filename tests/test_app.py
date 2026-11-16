@@ -4,6 +4,8 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from upwork_scraper import app
 from upwork_scraper import auth as app_auth
 from upwork_scraper.browser import BrowserSpec
@@ -654,3 +656,55 @@ def test_repair_leaves_updated_at_unchanged_on_repaired_rows(tmp_path):
     ).fetchone()
     assert row[0] == "15 to 20"
     assert row[1] == before == "2020-01-01"
+
+
+def _process_with_bucket(monkeypatch, stored, scraped):
+    conn, cursor = _jobs_db(":memory:")
+    _insert(cursor, "02b1", "[]", stored)
+    monkeypatch.setattr(
+        app,
+        "parse_job_details",
+        lambda _rows, job_url: {
+            "job_id": "02b1",
+            "job_url": job_url,
+            "job_title": "Title",
+            "posted_date": None,
+            "job_description": "Description",
+            "job_tags": '["Skill"]',
+            "job_proposals": scraped,
+        },
+    )
+    counts = app._process_jobs(["post"], ["/jobs/J_~02b1/"], cursor, FakeLogger())
+    row = cursor.execute("SELECT job_proposals, updated_at FROM jobs").fetchone()
+    return counts, row
+
+
+def test_process_jobs_never_replaces_stored_bucket_with_empty_value(monkeypatch):
+    counts, row = _process_with_bucket(monkeypatch, "5 to 10", "")
+    assert row == ("5 to 10", "2020-01-01")
+    assert (counts.updated, counts.unchanged) == (0, 1)
+
+
+@pytest.mark.parametrize("stored", ["", "Proposals:"])
+def test_process_jobs_replaces_empty_stored_bucket_with_real_bucket(monkeypatch, stored):
+    counts, row = _process_with_bucket(monkeypatch, stored, "10 to 15")
+    assert row[0] == "10 to 15"
+    assert row[1] != "2020-01-01"
+    assert counts.updated == 1
+
+
+def test_process_jobs_replaces_real_bucket_with_different_real_bucket(monkeypatch):
+    counts, row = _process_with_bucket(monkeypatch, "5 to 10", "10 to 15")
+    assert row[0] == "10 to 15"
+    assert counts.updated == 1
+
+
+def test_parse_quality_messages_read_naturally():
+    logger = FakeLogger()
+    app._log_parse_quality(
+        app.ScrapeCounts(inserted=4, without_skills=4, without_proposals=4), logger
+    )
+    texts = [args[0] % args[1:] for _, args in logger.messages]
+    assert any("have no skills" in text for text in texts)
+    assert any("have no proposal bucket" in text for text in texts)
+    assert not any("no a " in text for text in texts)
