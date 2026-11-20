@@ -43,7 +43,9 @@ def generate_job_id(job_title: str, job_url: str | None = None, job_description:
     cipher = extract_job_id_from_url(job_url)
     if cipher:
         return cipher
-    content = f"{job_title.lower()}|{job_description[:100].lower()}"
+    # Whitespace is collapsed first so line breaks never change the identity.
+    description = " ".join(job_description.split())
+    content = f"{job_title.lower()}|{description[:100].lower()}"
     return hashlib.md5(content.encode("utf-8")).hexdigest()
 
 
