@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from upwork_scraper.job_helpers import clean_job_proposals, parse_job_details
+from upwork_scraper.job_helpers import clean_job_proposals, generate_job_id, parse_job_details
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -74,3 +74,9 @@ def test_post_without_proposals_line_stores_empty_value():
 )
 def test_clean_job_proposals(text, expected):
     assert clean_job_proposals(text) == expected
+
+
+def test_generate_job_id_ignores_line_breaks_in_description():
+    flat = "Intro paragraph. Needs: - Python - SQL " * 5
+    broken = flat.replace(". ", ".\n\n").replace(": ", ":\n")
+    assert generate_job_id("T", None, flat) == generate_job_id("T", None, broken)
