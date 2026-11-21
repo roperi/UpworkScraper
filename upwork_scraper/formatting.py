@@ -52,20 +52,24 @@ def urllib_post(
 def same_words(original: str, formatted: str) -> bool:
     """True when ``formatted`` holds the same words as ``original`` in the same order.
 
-    Layout is ignored. The one allowed difference is a list marker (``-``, ``*``, ``•``)
-    that starts a line of the output: it may be added, or stand in for a marker token of
-    the input. A marker anywhere else is content and must be kept.
+    Layout is ignored. The one allowed difference concerns list markers (``-``, ``*``,
+    ``•``): a marker that starts an output line may be added, or may stand in for a marker
+    that also starts a line of the input. A marker inside a line of the input is content
+    (for example a minus sign) and must stay where it is, so it cannot be turned into a
+    bullet or dropped.
     """
 
-    source = original.split()
+    source: list[tuple[str, bool]] = []
+    for line in original.splitlines():
+        source.extend((word, index == 0) for index, word in enumerate(line.split()))
     position = 0
     for line in formatted.splitlines():
         for index, word in enumerate(line.split()):
-            is_leading_marker = index == 0 and word in LIST_MARKERS
-            if is_leading_marker:
-                if position < len(source) and source[position] in LIST_MARKERS:
+            current = source[position] if position < len(source) else None
+            if index == 0 and word in LIST_MARKERS:
+                if current is not None and current[0] in LIST_MARKERS and current[1]:
                     position += 1
-            elif position < len(source) and source[position] == word:
+            elif current is not None and current[0] == word:
                 position += 1
             else:
                 return False

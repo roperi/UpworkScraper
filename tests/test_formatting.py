@@ -119,11 +119,20 @@ def test_standalone_symbols_used_as_content_cannot_vanish(text, output):
     assert (result is not None) == (output == text)
 
 
-def test_flattened_inline_bullets_may_become_line_start_bullets():
-    text = "Tasks: - write code - test code"
+def test_content_marker_cannot_be_moved_to_a_bullet_position():
+    text = "compute x - 1 now"
+    assert run(FakePost(reply("compute x\n- 1 now")), text=text) is None
+    assert run(FakePost(reply("compute x\n\n- 1 now")), text=text) is None
+
+
+def test_added_line_start_bullets_are_accepted_when_input_has_no_markers():
+    text = "Tasks: write code test code"
+    assert run(FakePost(reply("Tasks:\n- write code\n• test code")), text=text) is not None
+
+
+def test_input_line_start_bullets_may_change_style():
+    text = "Tasks:\n• write code\n* test code"
     assert run(FakePost(reply("Tasks:\n- write code\n- test code")), text=text) is not None
-    assert run(FakePost(reply("Tasks:\n• write code\n• test code")), text=text) is not None
-    # Dropping the markers altogether is indistinguishable from deleting content.
     assert run(FakePost(reply("Tasks:\nwrite code\ntest code")), text=text) is None
 
 
