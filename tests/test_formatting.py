@@ -119,10 +119,21 @@ def test_standalone_symbols_used_as_content_cannot_vanish(text, output):
     assert (result is not None) == (output == text)
 
 
-def test_content_marker_cannot_be_moved_to_a_bullet_position():
-    text = "compute x - 1 now"
-    assert run(FakePost(reply("compute x\n- 1 now")), text=text) is None
-    assert run(FakePost(reply("compute x\n\n- 1 now")), text=text) is None
+def test_inline_markers_may_move_to_line_starts_with_the_sequence_unchanged():
+    text = "Tasks: • write code • test code and compute x - 1 now"
+    assert (
+        run(FakePost(reply("Tasks:\n• write code\n• test code and compute x\n- 1 now")), text=text)
+        is not None
+    )
+    assert run(
+        FakePost(reply("Tasks:\n- write code\n- test code and compute x - 1 now")), text=text
+    )
+
+
+def test_numbered_items_cannot_be_rewritten_as_bullets():
+    text = "Include: 1. Your name 2. Your goals"
+    assert run(FakePost(reply("Include:\n- Your name\n- Your goals")), text=text) is None
+    assert run(FakePost(reply("Include:\n1. Your name\n2. Your goals")), text=text) is not None
 
 
 def test_added_line_start_bullets_are_accepted_when_input_has_no_markers():
@@ -130,10 +141,16 @@ def test_added_line_start_bullets_are_accepted_when_input_has_no_markers():
     assert run(FakePost(reply("Tasks:\n- write code\n• test code")), text=text) is not None
 
 
-def test_input_line_start_bullets_may_change_style():
-    text = "Tasks:\n• write code\n* test code"
-    assert run(FakePost(reply("Tasks:\n- write code\n- test code")), text=text) is not None
+def test_dropping_markers_is_still_rejected():
+    text = "Tasks: - write code - test code"
     assert run(FakePost(reply("Tasks:\nwrite code\ntest code")), text=text) is None
+    assert run(FakePost(reply("Tasks:\n- write code\ntest code")), text=text) is None
+
+
+def test_system_prompt_asks_to_keep_numbering_and_markers():
+    post = FakePost(reply(STRUCTURED))
+    run(post)
+    assert "numbering" in post.calls[0][2]["messages"][0]["content"]
 
 
 def test_a_marker_in_the_middle_of_an_output_line_is_content():
