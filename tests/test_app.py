@@ -927,3 +927,68 @@ def test_process_jobs_collects_only_inserted_ids(monkeypatch):
 
     assert (counts.inserted, counts.updated) == (1, 1)
     assert ids == ["fresh"]
+
+
+def _enabled_snapshot_settings(tmp_path):
+    return Settings(
+        username="u@example.com",
+        password="secret",
+        first_name="FirstName",
+        database_path=tmp_path / "jobs.db",
+        openrouter_api_key=FORMAT_KEY,
+        openrouter_model="vendor/model",
+    )
+
+
+def _forbid_formatting(monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("snapshot modes must never call the formatter")
+
+    monkeypatch.setattr(app, "format_description", unexpected)
+    monkeypatch.setattr(app, "_format_new_jobs", unexpected)
+    monkeypatch.setattr(
+        app,
+        "launch_driver",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must not launch a browser")),
+    )
+
+
+def test_from_snapshot_never_formats_even_when_enabled(monkeypatch, tmp_path):
+    snapshot = tmp_path / "snap.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "text": "Posted 1 hour ago\nJob A\n",
+                "tiles": [{"href": "/jobs/Job-A_~021/", "uid": None, "title": None}],
+                "links": [],
+            }
+        )
+    )
+    monkeypatch.setattr(app, "load_settings", lambda: _enabled_snapshot_settings(tmp_path))
+    monkeypatch.setattr(app, "_logger", lambda level: FakeLogger())
+    _forbid_formatting(monkeypatch)
+
+    assert app.main(["--from-snapshot", str(snapshot)]) is True
+
+    conn = sqlite3.connect(tmp_path / "jobs.db")
+    rows = conn.execute("SELECT COUNT(*), COUNT(job_description_formatted) FROM jobs").fetchone()
+    conn.close()
+    assert rows[0] >= 1 and rows[1] == 0
+
+
+def test_repair_from_snapshot_never_formats_even_when_enabled(monkeypatch, tmp_path):
+    conn, cursor = _jobs_db(tmp_path / "jobs.db")
+    _insert(cursor, "02a1", "[]", "Proposals:")
+    conn.commit()
+    conn.close()
+    snapshot = _fixture_snapshot(tmp_path, "best_matches_newer_layout.txt", NEWER_IDS)
+    monkeypatch.setattr(app, "load_settings", lambda: _enabled_snapshot_settings(tmp_path))
+    monkeypatch.setattr(app, "_logger", lambda level: FakeLogger())
+    _forbid_formatting(monkeypatch)
+
+    assert app.main(["--repair-from-snapshot", str(snapshot)]) is True
+
+    conn = sqlite3.connect(tmp_path / "jobs.db")
+    formatted = conn.execute("SELECT job_description_formatted FROM jobs").fetchall()
+    conn.close()
+    assert formatted == [(None,)]
