@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from collections.abc import Callable
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 REQUEST_TIMEOUT_SECONDS = 30
 LIST_MARKERS = frozenset({"-", "*", "•"})
+RETRY_DELAY_SECONDS = 2
 
 SYSTEM_PROMPT = (
     "You reformat text. Restore paragraph breaks and put list items on their own lines "
@@ -47,14 +49,27 @@ def urllib_post(
         raise
 
 
-def _words(text: str) -> list[str]:
-    return [word for word in text.split() if word not in LIST_MARKERS]
-
-
 def same_words(original: str, formatted: str) -> bool:
-    """True when both texts hold the same words, ignoring layout and list markers."""
+    """True when ``formatted`` holds the same words as ``original`` in the same order.
 
-    return _words(original) == _words(formatted)
+    Layout is ignored. The one allowed difference is a list marker (``-``, ``*``, ``•``)
+    that starts a line of the output: it may be added, or stand in for a marker token of
+    the input. A marker anywhere else is content and must be kept.
+    """
+
+    source = original.split()
+    position = 0
+    for line in formatted.splitlines():
+        for index, word in enumerate(line.split()):
+            is_leading_marker = index == 0 and word in LIST_MARKERS
+            if is_leading_marker:
+                if position < len(source) and source[position] in LIST_MARKERS:
+                    position += 1
+            elif position < len(source) and source[position] == word:
+                position += 1
+            else:
+                return False
+    return position == len(source)
 
 
 def _retryable(status: int) -> bool:
@@ -99,6 +114,7 @@ def format_description(
             return None
         if status == -1 or _retryable(status):
             if attempt == 1:
+                time.sleep(RETRY_DELAY_SECONDS)
                 continue
             reason = "TimeoutError" if status == -1 else f"HTTP {status}"
             logger.warning("Description formatting failed (model=%s): %s", model, reason)

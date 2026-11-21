@@ -9,10 +9,10 @@ import paths changed.
 
 ### Added
 
-- Optional description formatting: with `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` set, new
-  jobs get a paragraph- and bullet-structured copy of their description in the new
-  `job_description_formatted` column, validated to contain the same words as the original.
-  `--no-format` skips it for a run; existing databases are upgraded automatically (#28).
+- Optional description formatting: with `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` set, the
+  description text of new jobs is sent to OpenRouter and a paragraph- and bullet-structured copy
+  is saved in the new `job_description_formatted` column, validated to contain the same words as
+  the original. Off by default; `--no-format` skips it for a run; existing databases are upgraded automatically (#28).
 - Feed snapshots saved to `log/snapshots/` before parsing, and `--from-snapshot` to import one
   into the database without scraping.
 - `--repair-from-snapshot` to fill empty `job_tags` and `job_proposals` of stored jobs from saved

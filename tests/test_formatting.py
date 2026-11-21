@@ -18,6 +18,13 @@ STRUCTURED = (
 )
 
 
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(formatting.time, "sleep", recorded.append)
+    return recorded
+
+
 def reply(content, usage=None, status=200):
     body = {"choices": [{"message": {"content": content}}]}
     if usage is not None:
@@ -86,10 +93,42 @@ def test_injection_style_input_that_changes_output_is_rejected():
     assert post.calls[0][2]["messages"][1]["content"] == text
 
 
-def test_timeout_is_retried_once_then_succeeds():
+def test_timeout_is_retried_once_then_succeeds(sleeps):
     post = FakePost(TimeoutError(), reply(STRUCTURED))
     assert run(post) == STRUCTURED
     assert len(post.calls) == 2
+    assert sleeps == [formatting.RETRY_DELAY_SECONDS]
+
+
+def test_no_delay_without_a_retry(sleeps):
+    assert run(FakePost(reply(STRUCTURED))) == STRUCTURED
+    assert run(FakePost((401, b"{}"))) is None
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("text", "output"),
+    [
+        ("compute x - 1 now", "compute x 1 now"),
+        ("match * files", "match files"),
+        ("compute x - 1 now", "compute x - 1 now"),
+    ],
+)
+def test_standalone_symbols_used_as_content_cannot_vanish(text, output):
+    result = run(FakePost(reply(output)), text=text)
+    assert (result is not None) == (output == text)
+
+
+def test_flattened_inline_bullets_may_become_line_start_bullets():
+    text = "Tasks: - write code - test code"
+    assert run(FakePost(reply("Tasks:\n- write code\n- test code")), text=text) is not None
+    assert run(FakePost(reply("Tasks:\n• write code\n• test code")), text=text) is not None
+    # Dropping the markers altogether is indistinguishable from deleting content.
+    assert run(FakePost(reply("Tasks:\nwrite code\ntest code")), text=text) is None
+
+
+def test_a_marker_in_the_middle_of_an_output_line_is_content():
+    assert run(FakePost(reply("Intro - one")), text="Intro one") is None
 
 
 @pytest.mark.parametrize("status", [429, 500, 503])
