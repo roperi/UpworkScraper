@@ -67,6 +67,47 @@ def test_validate_login_does_not_open_database(monkeypatch):
     assert driver.closed is True
 
 
+def _check_config(monkeypatch, capsys, argv, **settings_kwargs):
+    settings = Settings(
+        username="user@example.com", password="secret", first_name="FirstName", **settings_kwargs
+    )
+    monkeypatch.setattr(app, "load_settings", lambda: settings)
+    monkeypatch.setattr(app, "_logger", lambda level: FakeLogger())
+    monkeypatch.setattr(
+        app, "discover_browser", lambda path: BrowserSpec(Path("/usr/bin/chrome"), "151.0.0")
+    )
+    assert app.main(argv) is True
+    return capsys.readouterr().out
+
+
+def test_check_config_reports_formatting_disabled(monkeypatch, capsys):
+    out = _check_config(monkeypatch, capsys, ["--check-config"])
+    assert "description formatting: disabled" in out
+
+
+def test_check_config_reports_formatting_enabled_without_the_key(monkeypatch, capsys):
+    out = _check_config(
+        monkeypatch,
+        capsys,
+        ["--check-config"],
+        openrouter_api_key="sk-test-key",
+        openrouter_model="vendor/model",
+    )
+    assert "description formatting: enabled (model=vendor/model)" in out
+    assert "sk-test-key" not in out
+
+
+def test_check_config_reports_disabled_with_no_format_flag(monkeypatch, capsys):
+    out = _check_config(
+        monkeypatch,
+        capsys,
+        ["--check-config", "--no-format"],
+        openrouter_api_key="sk-test-key",
+        openrouter_model="vendor/model",
+    )
+    assert "description formatting: disabled" in out
+
+
 def test_cli_converts_success_to_zero(monkeypatch):
     monkeypatch.setattr(app, "main", lambda: True)
 

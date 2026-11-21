@@ -146,6 +146,12 @@ def _log_document_responses(driver, logger: logging.Logger) -> None:
         logger.info("Response %s for %s (%s)", document["status"], document["url"], details)
 
 
+def _formatting_status(settings, no_format: bool) -> str:
+    if no_format or not settings.formatting_enabled:
+        return "description formatting: disabled"
+    return f"description formatting: enabled (model={settings.openrouter_model})"
+
+
 def _arguments(argv: list[str] | None):
     parser = ArgumentParser(description="Scrape Upwork Best Matches once")
     parser.add_argument("--check-config", action="store_true", help="validate settings and browser")
@@ -170,6 +176,11 @@ def _arguments(argv: list[str] | None):
             "log/snapshots/*.json files; never overwrites a non-empty value or adds jobs. "
             "Pass snapshots oldest first (the first non-empty value found for a job is kept)"
         ),
+    )
+    parser.add_argument(
+        "--no-format",
+        action="store_true",
+        help="skip the optional OpenRouter description formatting for this run",
     )
     parser.add_argument("--verification-timeout", type=int)
     parser.add_argument("--log-level")
@@ -657,6 +668,7 @@ def main(argv: list[str] | None = None) -> bool:
         try:
             browser = discover_browser(settings.browser_executable_path)
             print(f"Configuration is valid; browser={browser.executable} version={browser.version}")
+            print(_formatting_status(settings, args.no_format))
             return True
         except Exception as exc:
             print(f"Configuration error: {exc}", file=sys.stderr)

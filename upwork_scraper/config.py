@@ -51,6 +51,14 @@ class Settings:
     database_path: Path = Path("upwork_jobs.db")
     verification_timeout: int = 120
     log_level: str = "INFO"
+    openrouter_api_key: str | None = field(default=None, repr=False)
+    openrouter_model: str | None = None
+
+    @property
+    def formatting_enabled(self) -> bool:
+        """Description formatting needs both an OpenRouter key and a model."""
+
+        return bool(self.openrouter_api_key and self.openrouter_model)
 
 
 def _env(name: str, environ: Mapping[str, str]) -> str | None:
@@ -95,4 +103,6 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         database_path=Path(_env("UPWORK_DATABASE_PATH", values) or "upwork_jobs.db"),
         verification_timeout=verification_timeout,
         log_level=(_env("LOG_LEVEL", values) or "INFO").upper(),
+        openrouter_api_key=_env("OPENROUTER_API_KEY", values),
+        openrouter_model=_env("OPENROUTER_MODEL", values),
     )

@@ -69,3 +69,37 @@ def test_proxy_server_rejects_embedded_credentials() -> None:
 def test_missing_profile_name_fails() -> None:
     with pytest.raises(ConfigurationError, match="UPWORK_FIRST_NAME must be set"):
         load_settings({"UPWORK_USERNAME": "user@example.com", "UPWORK_PASSWORD": "secret"})
+
+
+BASE_ENV = {"UPWORK_USERNAME": "user@example.com", "UPWORK_FIRST_NAME": "FirstName"}
+
+
+def test_formatting_is_disabled_by_default() -> None:
+    settings = load_settings(BASE_ENV)
+
+    assert settings.openrouter_api_key is None
+    assert settings.openrouter_model is None
+    assert settings.formatting_enabled is False
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"OPENROUTER_API_KEY": "key-value"},
+        {"OPENROUTER_MODEL": "vendor/model"},
+        {"OPENROUTER_API_KEY": "  ", "OPENROUTER_MODEL": "vendor/model"},
+        {"OPENROUTER_API_KEY": "key-value", "OPENROUTER_MODEL": "  "},
+    ],
+)
+def test_formatting_needs_both_key_and_model(extra) -> None:
+    assert load_settings({**BASE_ENV, **extra}).formatting_enabled is False
+
+
+def test_formatting_enabled_with_both_and_key_is_hidden_from_repr() -> None:
+    settings = load_settings(
+        {**BASE_ENV, "OPENROUTER_API_KEY": " key-value ", "OPENROUTER_MODEL": " vendor/model "}
+    )
+
+    assert settings.formatting_enabled is True
+    assert settings.openrouter_model == "vendor/model"
+    assert "key-value" not in repr(settings)
