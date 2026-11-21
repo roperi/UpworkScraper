@@ -24,6 +24,7 @@ from .auth import UpworkBlockedError, ensure_not_blocked, login
 from .browser import discover_browser, launch_driver
 from .config import ConfigurationError, load_settings, validate_proxy_server
 from .database import connect_to_db, create_db, resolve_database_path
+from .formatting import format_description
 from .job_helpers import parse_job_details
 
 SCROLL_STEPS = 12
@@ -33,6 +34,7 @@ JOB_COUNT_STABLE_POLLS = 3
 JOB_COUNT_STABLE_TIMEOUT = 30
 DOCUMENT_HEADERS = ("cf-ray", "cf-mitigated", "server", "retry-after", "location")
 DOCUMENT_LOG_LIMIT = 4
+MAX_FORMAT_CALLS = 50
 SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "log" / "snapshots"
 
 
@@ -146,6 +148,12 @@ def _log_document_responses(driver, logger: logging.Logger) -> None:
         logger.info("Response %s for %s (%s)", document["status"], document["url"], details)
 
 
+def _formatting_status(settings, no_format: bool) -> str:
+    if no_format or not settings.formatting_enabled:
+        return "description formatting: disabled"
+    return f"description formatting: enabled (model={settings.openrouter_model})"
+
+
 def _arguments(argv: list[str] | None):
     parser = ArgumentParser(description="Scrape Upwork Best Matches once")
     parser.add_argument("--check-config", action="store_true", help="validate settings and browser")
@@ -170,6 +178,11 @@ def _arguments(argv: list[str] | None):
             "log/snapshots/*.json files; never overwrites a non-empty value or adds jobs. "
             "Pass snapshots oldest first (the first non-empty value found for a job is kept)"
         ),
+    )
+    parser.add_argument(
+        "--no-format",
+        action="store_true",
+        help="skip the optional OpenRouter description formatting for this run",
     )
     parser.add_argument("--verification-timeout", type=int)
     parser.add_argument("--log-level")
@@ -504,8 +517,17 @@ def _repair_from_snapshot(
     return RepairCounts(repaired, unchanged, missing, failed)
 
 
-def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> ScrapeCounts:
-    """Parse and persist posts, retaining progress when one post fails."""
+def _process_jobs(
+    job_posts: list[str],
+    job_urls: list[str],
+    cursor,
+    logger,
+    inserted_ids: list[str] | None = None,
+) -> ScrapeCounts:
+    """Parse and persist posts, retaining progress when one post fails.
+
+    When ``inserted_ids`` is given, the ``job_id`` of every newly inserted row is appended.
+    """
 
     if len(job_posts) != len(job_urls):
         logger.warning(
@@ -560,6 +582,8 @@ def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> 
                     ),
                 )
                 inserted += 1
+                if inserted_ids is not None:
+                    inserted_ids.append(details["job_id"])
         except Exception as exc:
             failed += 1
             logger.warning("Job %d/%d failed: %s", index + 1, processable, exc)
@@ -578,6 +602,59 @@ def _process_jobs(job_posts: list[str], job_urls: list[str], cursor, logger) -> 
     )
     _log_parse_quality(counts, logger)
     return counts
+
+
+def _format_new_jobs(job_ids: list[str], cursor, settings, logger) -> None:
+    """Store a model-formatted description for jobs inserted in this run.
+
+    Best effort: a failure leaves the column NULL and never affects the scrape.
+    """
+
+    attempted = formatted = 0
+    tokens = 0
+
+    def add_tokens(count: int) -> None:
+        nonlocal tokens
+        tokens += count
+
+    to_format = job_ids[:MAX_FORMAT_CALLS]
+    skipped = len(job_ids) - len(to_format)
+    for job_id in to_format:
+        try:
+            row = cursor.execute(
+                "SELECT job_description FROM jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None or not row[0]:
+                continue
+            attempted += 1
+            result = format_description(
+                row[0],
+                api_key=settings.openrouter_api_key,
+                model=settings.openrouter_model,
+                on_usage=add_tokens,
+            )
+            if result is None:
+                continue
+            cursor.execute(
+                "UPDATE jobs SET job_description_formatted = ? WHERE job_id = ?",
+                (result, job_id),
+            )
+            formatted += 1
+        except Exception as exc:
+            logger.warning("Formatting job failed: %s", type(exc).__name__)
+    if skipped:
+        logger.info(
+            "Description formatting call cap reached: %d new jobs left unformatted", skipped
+        )
+    logger.info(
+        "Description formatting: %d attempted, %d formatted, %d rejected or failed, "
+        "%d skipped by cap, %d tokens",
+        attempted,
+        formatted,
+        attempted - formatted,
+        skipped,
+        tokens,
+    )
 
 
 def _repair_main(snapshot_paths: list[str], settings, logger: logging.Logger) -> bool:
@@ -657,6 +734,7 @@ def main(argv: list[str] | None = None) -> bool:
         try:
             browser = discover_browser(settings.browser_executable_path)
             print(f"Configuration is valid; browser={browser.executable} version={browser.version}")
+            print(_formatting_status(settings, args.no_format))
             return True
         except Exception as exc:
             print(f"Configuration error: {exc}", file=sys.stderr)
@@ -741,7 +819,10 @@ def main(argv: list[str] | None = None) -> bool:
                 "No job links were found on the Best Matches feed; the page markup may have "
                 "changed, or Upwork served an unexpected page"
             )
-        counts = _process_jobs(job_posts, job_urls, cursor, logger)
+        new_job_ids: list[str] = []
+        counts = _process_jobs(job_posts, job_urls, cursor, logger, new_job_ids)
+        if settings.formatting_enabled and not args.no_format and new_job_ids:
+            _format_new_jobs(new_job_ids, cursor, settings, logger)
         conn.commit()
         logger.info(
             "Scraping completed: %d job posts processed (%d inserted, %d updated, "

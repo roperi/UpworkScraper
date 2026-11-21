@@ -136,6 +136,8 @@ UPWORK_PASSWORD=replace-me
   `socks5://host:port`, or `host:port` (HTTP shorthand).
 * `UPWORK_DATABASE_PATH`, `UPWORK_DRIVER_CACHE_DIR`, `UPWORK_BROWSER_PROFILE_DIR`,
   `UPWORK_VERIFICATION_TIMEOUT`, and `LOG_LEVEL` are optional.
+* `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` are optional and enable description formatting
+  (see [Formatted descriptions](#formatted-descriptions-optional)). Both must be set.
 * The browser profile is persistent by default, so cookies and completed Upwork
   verification can be reused on later runs. Do not use the profile directory
   concurrently from multiple scraper processes.
@@ -251,6 +253,24 @@ During a scrape, progress logs report each scroll step, the number of visible jo
 counts, and periodic insert/update/unchanged/failure totals. The final message reports inserted,
 updated, unchanged, failed, and skipped jobs after the database commit succeeds. An updated job has
 a changed proposal value; an unchanged job was already stored with the same proposal value.
+
+### Formatted descriptions (optional)
+
+Stored descriptions are flat text. When `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` are both set,
+each job inserted during a run is also sent to that [OpenRouter](https://openrouter.ai) model,
+which restores paragraph breaks and `-` bullets. The result is saved in the
+`job_description_formatted` column; `job_description` is never changed.
+
+* Off by default. With either variable unset, or with `--no-format`, no request is made.
+* The description text of new jobs is sent to OpenRouter and the chosen model provider. Nothing
+  else is sent, and existing jobs are never sent. Check your use against their terms.
+* This is a paid service billed by OpenRouter per token. At most 50 jobs are formatted per run;
+  the run log reports the calls made and tokens used.
+* The model's output is stored only if it contains exactly the same words as the original.
+  Otherwise, or if the request fails, the column stays empty; it is not retried on later runs.
+* `--check-config` shows whether formatting is enabled and which model, never the key.
+* Existing databases gain the nullable column automatically on the next run. Snapshot import and
+  repair never format.
 
 ### Google, Apple, and two-step login
 
