@@ -749,3 +749,181 @@ def test_parse_quality_messages_read_naturally():
     assert any("have no skills" in text for text in texts)
     assert any("have no proposal bucket" in text for text in texts)
     assert not any("no a " in text for text in texts)
+
+
+# --- optional description formatting -------------------------------------------------
+
+FORMAT_KEY = "sk-or-test-SECRET-456"
+
+
+class RecordingPost:
+    """Fake HTTP transport that echoes the user message with a paragraph break added."""
+
+    def __init__(self, behavior=None):
+        self.calls = []
+        self.behavior = behavior
+
+    def __call__(self, url, headers, body, timeout):
+        self.calls.append(json.loads(body))
+        if self.behavior is not None:
+            return self.behavior(len(self.calls))
+        text = json.loads(body)["messages"][1]["content"]
+        content = text.replace(". ", ".\n\n", 1)
+        return 200, json.dumps(
+            {"choices": [{"message": {"content": content}}], "usage": {"total_tokens": 10}}
+        ).encode()
+
+
+def _live_run(monkeypatch, tmp_path, new_count, post, argv=(), enabled=True, existing=()):
+    """Run main() through the live path with a fake browser and invented jobs."""
+
+    settings = Settings(
+        username="user@example.com",
+        password="secret",
+        first_name="FirstName",
+        database_path=tmp_path / "jobs.db",
+        openrouter_api_key=FORMAT_KEY if enabled else None,
+        openrouter_model="vendor/model" if enabled else None,
+    )
+    conn = sqlite3.connect(tmp_path / "jobs.db")
+    create_db(conn, conn.cursor())
+    for job_id in existing:
+        conn.execute(
+            "INSERT INTO jobs (job_id, job_url, job_title, job_description, job_proposals) "
+            "VALUES (?, 'u', 'T', 'Old text. More old text.', 'old')",
+            (job_id,),
+        )
+    conn.commit()
+    conn.close()
+
+    ids = list(existing) + [f"new{i}" for i in range(new_count)]
+    driver = FakeDriver()
+    monkeypatch.setattr(app, "load_settings", lambda: settings)
+    monkeypatch.setattr(app, "_logger", lambda level: logging.getLogger("upwork_scraper"))
+    monkeypatch.setattr(
+        app, "launch_driver", lambda s: (driver, BrowserSpec(Path("/usr/bin/chrome"), "1"))
+    )
+    monkeypatch.setattr(app, "login", lambda *a: None)
+    monkeypatch.setattr(app, "_load_job_list", lambda *a: None)
+    monkeypatch.setattr(app, "_save_snapshot", lambda *a: {})
+    monkeypatch.setattr(app, "_posts_and_urls", lambda *a: (ids, [f"/jobs/{i}/" for i in ids]))
+    monkeypatch.setattr(
+        app,
+        "parse_job_details",
+        lambda rows, job_url: {
+            "job_id": rows[0],
+            "job_url": job_url,
+            "job_title": "Title",
+            "posted_date": None,
+            "job_description": f"Invented text for {rows[0]}. Second sentence here.",
+            "job_tags": "[]",
+            "job_proposals": "new",
+        },
+    )
+    real = app.format_description
+    monkeypatch.setattr(app, "format_description", lambda *a, **kw: real(*a, post=post, **kw))
+    monkeypatch.setattr(app, "_document_responses", lambda d: [])
+    assert app.main(list(argv)) is True
+    return sqlite3.connect(tmp_path / "jobs.db")
+
+
+def _formatted(conn):
+    return dict(conn.execute("SELECT job_id, job_description_formatted FROM jobs"))
+
+
+def test_new_jobs_get_formatted_description(monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    post = RecordingPost()
+    conn = _live_run(monkeypatch, tmp_path, 2, post)
+
+    assert len(post.calls) == 2
+    stored = dict(conn.execute("SELECT job_id, job_description FROM jobs"))
+    formatted = _formatted(conn)
+    assert stored["new0"] == "Invented text for new0. Second sentence here."
+    assert formatted["new0"] == "Invented text for new0.\n\nSecond sentence here."
+    assert "2 attempted, 2 formatted, 0 rejected or failed, 0 skipped by cap, 20 tokens" in (
+        caplog.text
+    )
+    assert FORMAT_KEY not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("enabled", "argv"), [(False, ()), (True, ("--no-format",))], ids=["unconfigured", "flag"]
+)
+def test_no_http_call_when_disabled(monkeypatch, tmp_path, enabled, argv):
+    post = RecordingPost()
+    conn = _live_run(monkeypatch, tmp_path, 3, post, argv=argv, enabled=enabled)
+
+    assert post.calls == []
+    assert set(_formatted(conn).values()) == {None}
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone() == (3,)
+
+
+def test_existing_jobs_are_never_sent_to_the_model(monkeypatch, tmp_path):
+    post = RecordingPost()
+    conn = _live_run(monkeypatch, tmp_path, 1, post, existing=("old1", "old2"))
+
+    assert len(post.calls) == 1
+    assert "new0" in post.calls[0]["messages"][1]["content"]
+    formatted = _formatted(conn)
+    assert formatted["old1"] is None and formatted["old2"] is None
+    assert formatted["new0"] is not None
+    descriptions = dict(conn.execute("SELECT job_id, job_description FROM jobs"))
+    assert descriptions["old1"] == "Old text. More old text."
+
+
+def test_call_cap_limits_requests_and_logs_skipped(monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    post = RecordingPost()
+    conn = _live_run(monkeypatch, tmp_path, app.MAX_FORMAT_CALLS + 3, post)
+
+    assert len(post.calls) == app.MAX_FORMAT_CALLS == 50
+    values = list(_formatted(conn).values())
+    assert sum(v is not None for v in values) == 50
+    assert sum(v is None for v in values) == 3
+    assert "3 skipped by cap" in caplog.text
+
+
+def test_failures_leave_null_but_run_still_commits(monkeypatch, tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+
+    def behavior(n):
+        if n == 1:
+            return 200, b"garbage"
+        if n == 2:
+            raise RuntimeError(f"transport failed for Bearer {FORMAT_KEY}")
+        return 200, json.dumps({"choices": [{"message": {"content": "Changed words"}}]}).encode()
+
+    post = RecordingPost(behavior)
+    conn = _live_run(monkeypatch, tmp_path, 3, post)
+
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone() == (3,)
+    assert set(_formatted(conn).values()) == {None}
+    assert "0 formatted, 3 rejected or failed" in caplog.text
+    assert FORMAT_KEY not in caplog.text
+
+
+def test_process_jobs_collects_only_inserted_ids(monkeypatch):
+    conn, cursor = _jobs_db(":memory:")
+    cursor.execute(
+        "INSERT INTO jobs (job_id, job_url, job_title, job_description, job_proposals) "
+        "VALUES ('old', 'u', 'T', 'D', 'old')"
+    )
+    monkeypatch.setattr(
+        app,
+        "parse_job_details",
+        lambda rows, job_url: {
+            "job_id": rows[0],
+            "job_url": job_url,
+            "job_title": "T",
+            "posted_date": None,
+            "job_description": "D",
+            "job_tags": "[]",
+            "job_proposals": "new",
+        },
+    )
+    ids: list[str] = []
+    counts = app._process_jobs(["old", "fresh"], ["/a/", "/b/"], cursor, FakeLogger(), ids)
+
+    assert (counts.inserted, counts.updated) == (1, 1)
+    assert ids == ["fresh"]
