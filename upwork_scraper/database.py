@@ -24,7 +24,7 @@ def connect_to_db(database_path: str | Path = "upwork_jobs.db"):
 
 
 def create_db(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
-    """Create the jobs table when it does not already exist."""
+    """Create the jobs table, or add any column an older database is missing."""
 
     cursor.execute(
         """
@@ -37,8 +37,12 @@ def create_db(conn: sqlite3.Connection, cursor: sqlite3.Cursor) -> None:
             job_description TEXT NOT NULL,
             job_tags TEXT,
             job_proposals TEXT,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            job_description_formatted TEXT
         )
         """
     )
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(jobs)")}
+    if "job_description_formatted" not in columns:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN job_description_formatted TEXT")
     conn.commit()
